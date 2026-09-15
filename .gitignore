@@ -1,0 +1,7 @@
+target/
+.idea/
+*.iml
+.env
+.codegraph/
+*.log
+*.err

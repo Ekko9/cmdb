@@ -1,0 +1,24 @@
+services:
+  cmdb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: orbit-cmdb:1.0.0
+    container_name: orbit-cmdb
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    environment:
+      SERVER_PORT: 8080
+      DB_URL: "${DB_URL:?DB_URL must be set in .env or the shell environment}"
+      DB_USERNAME: "${DB_USERNAME:?DB_USERNAME must be set in .env or the shell environment}"
+      DB_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD must be set in .env or the shell environment}"
+      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env or the shell environment}"
+      JWT_EXPIRE_HOURS: "${JWT_EXPIRE_HOURS:-12}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s

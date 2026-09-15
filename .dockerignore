@@ -1,0 +1,13 @@
+.git
+.gitignore
+.codegraph
+.idea
+*.iml
+target
+database
+README.md
+.env
+*.log
+*.err
+*.tmp
+k8s
