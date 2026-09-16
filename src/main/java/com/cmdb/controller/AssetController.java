@@ -5,12 +5,14 @@ import com.cmdb.entity.Asset;
 import com.cmdb.entity.AssetTypeOption;
 import com.cmdb.entity.ImportAudit;
 import com.cmdb.entity.ImportFailure;
+import com.cmdb.entity.RegionOption;
 import com.cmdb.repo.AssetRepository;
 import com.cmdb.repo.AssetTypeOptionRepository;
 import com.cmdb.repo.AssetChangeRepository;
 import com.cmdb.repo.ImportAuditRepository;
 import com.cmdb.repo.ImportFailureRepository;
 import com.cmdb.repo.ProjectRepository;
+import com.cmdb.repo.RegionOptionRepository;
 import jakarta.persistence.criteria.JoinType;
 import jakarta.servlet.http.HttpServletRequest;
 import org.apache.commons.csv.CSVFormat;
@@ -45,17 +47,20 @@ public class AssetController {
     private final AssetChangeRepository assetChanges;
     private final ImportAuditRepository importAudits;
     private final ImportFailureRepository importFailures;
+    private final RegionOptionRepository regionOptions;
     private final AuditService auditService;
 
     public AssetController(AssetRepository assets, ProjectRepository projects, AssetTypeOptionRepository assetTypes,
                            AssetChangeRepository assetChanges, ImportAuditRepository importAudits,
-                           ImportFailureRepository importFailures, AuditService auditService) {
+                           ImportFailureRepository importFailures, RegionOptionRepository regionOptions,
+                           AuditService auditService) {
         this.assets = assets;
         this.projects = projects;
         this.assetTypes = assetTypes;
         this.assetChanges = assetChanges;
         this.importAudits = importAudits;
         this.importFailures = importFailures;
+        this.regionOptions = regionOptions;
         this.auditService = auditService;
     }
 
@@ -136,6 +141,22 @@ public class AssetController {
     @Transactional(readOnly = true)
     public List<String> types() {
         return assetTypeCodes();
+    }
+
+    @GetMapping("/regions")
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> regions() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (RegionOption option : regionOptions.findByEnabledTrueOrderBySortOrderAscCountryAscRegionAsc()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", option.getId());
+            item.put("continent", option.getContinent());
+            item.put("country", option.getCountry());
+            item.put("region", option.getRegion());
+            item.put("label", regionLabel(option));
+            result.add(item);
+        }
+        return result;
     }
 
     @PostMapping("/import")
@@ -295,13 +316,14 @@ public class AssetController {
             Sheet options = workbook.createSheet("选项");
             String[] headers = {"名称", "类型", "环境", "内网IP", "外网IP", "主机名", "项目名称", "状态", "区域", "描述"};
             writeHeader(workbook, sheet, headers);
+            List<RegionOption> regions = regionOptions.findByEnabledTrueOrderBySortOrderAscCountryAscRegionAsc();
             Row sample = sheet.createRow(1);
             String[] values = {"示例资产-请修改", "SERVER", "PRODUCTION", "10.0.0.10", "203.0.113.10",
                     "example-server", projects.count() == 0 ? "" : projects.findAll().get(0).getName(),
-                    "ONLINE", "杭州", "请替换为实际资产信息"};
+                    "ONLINE", regions.isEmpty() ? "亚洲 / 中国 / 北京" : regionLabel(regions.get(0)), "请替换为实际资产信息"};
             for (int i = 0; i < values.length; i++) writeCell(sample, i, values[i]);
 
-            String[] optionHeaders = {"项目名称", "类型", "环境", "状态"};
+            String[] optionHeaders = {"项目名称", "类型", "环境", "状态", "区域"};
             Row optionHeader = options.createRow(0);
             for (int i = 0; i < optionHeaders.length; i++) writeCell(optionHeader, i, optionHeaders[i]);
             List<com.cmdb.entity.Project> projectList = projects.findAll();
@@ -312,15 +334,21 @@ public class AssetController {
             for (int i = 0; i < types.size(); i++) writeCell(optionRow(options, i + 1), 1, types.get(i));
             for (int i = 0; i < environments.length; i++) writeCell(optionRow(options, i + 1), 2, environments[i]);
             for (int i = 0; i < statuses.length; i++) writeCell(optionRow(options, i + 1), 3, statuses[i]);
+            for (int i = 0; i < regions.size(); i++) {
+                RegionOption region = regions.get(i);
+                writeCell(optionRow(options, i + 1), 4, regionLabel(region));
+            }
 
             defineName(workbook, "ProjectOptions", "'选项'!$A$2:$A$" + Math.max(2, projectList.size() + 1));
             defineName(workbook, "TypeOptions", "'选项'!$B$2:$B$" + (types.size() + 1));
             defineName(workbook, "EnvironmentOptions", "'选项'!$C$2:$C$" + (environments.length + 1));
             defineName(workbook, "StatusOptions", "'选项'!$D$2:$D$" + (statuses.length + 1));
+            defineName(workbook, "RegionOptions", "'选项'!$E$2:$E$" + Math.max(2, regions.size() + 1));
             addDropdown(sheet, "ProjectOptions", 1, 1000, 6);
             addDropdown(sheet, "TypeOptions", 1, 1000, 1);
             addDropdown(sheet, "EnvironmentOptions", 1, 1000, 2);
             addDropdown(sheet, "StatusOptions", 1, 1000, 7);
+            addDropdown(sheet, "RegionOptions", 1, 1000, 8);
             sizeColumns(sheet, headers.length);
             sizeColumns(options, optionHeaders.length);
             options.createFreezePane(0, 1);
@@ -481,6 +509,10 @@ public class AssetController {
             codes.addAll(Arrays.asList("SERVER", "DATABASE", "NETWORK", "STORAGE", "APPLICATION", "OTHER"));
         }
         return codes;
+    }
+
+    private String regionLabel(RegionOption option) {
+        return String.join(" / ", option.getContinent(), option.getCountry(), option.getRegion());
     }
 
     private void addDropdown(Sheet sheet, String formula, int firstRow, int lastRow, int column) {

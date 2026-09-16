@@ -29,7 +29,7 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 ### 1.3 资产清单
 
 - 新建、编辑和删除资产。
-- 支持资产类型、环境、状态、区域、内网 IP、外网 IP、主机名和描述。
+- 支持资产类型、环境、状态、区域、内网 IP、外网 IP、主机名和描述；区域维护为洲、国家/地区、城市/区域三级字典下拉。
 - 支持按内网 IP、外网 IP 和项目筛选资产。
 - 支持 CSV 和 Excel（`.xlsx`）批量导入。
 - 支持 CSV 和 Excel（`.xlsx`）导出。
@@ -65,8 +65,7 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 ```text
 cmdb/
 ├─ database/
-│  ├─ init.sql                    # 数据库、表和索引初始化脚本
-│  ├─ upgrade-v2-and-samples.sql  # V2 手工升级和资产样例数据脚本
+│  ├─ init.sql                    # 完整数据库初始化单一入口
 │  ├─ asset-import-template.csv  # 资产导入 CSV 模板，包含样例
 │  └─ asset-import-template.xlsx # 资产导入 Excel 模板，包含下拉选项和样例
 ├─ src/
@@ -122,16 +121,18 @@ source D:/workspace/cmdb/database/init.sql;
 
 也可以直接打开 `database/init.sql`，复制全部内容到 SQL 客户端执行。
 
-脚本会完成以下操作：
+`database/init.sql` 现在是完整的单一手工初始化入口，脚本会完成以下操作：
 
 1. 创建 `cmdb` 数据库。
 2. 创建 `sys_user` 用户表。
 3. 创建 `cmdb_project` 项目表。
 4. 创建 `cmdb_asset` 资产表。
 5. 创建 `cmdb_asset_type` 资产类型选项表并写入默认类型。
-6. 创建项目与资产之间的外键关系。
-7. 创建常用查询索引。
-8. 创建资产变更记录、导入审计、导入失败明细和操作审计日志表。
+6. 创建 `cmdb_region` 区域字典表，并写入洲、国家/地区、城市/区域字典。
+7. 创建项目与资产之间的外键关系。
+8. 创建常用查询索引。
+9. 创建资产变更记录、导入审计、导入失败明细和操作审计日志表。
+10. 预置可重复执行的样例数据语句，默认不插入样例数据。
 
 脚本使用 `CREATE DATABASE IF NOT EXISTS` 和 `CREATE TABLE IF NOT EXISTS`，重复执行不会重复创建已有对象。
 
@@ -142,6 +143,7 @@ sys_user       用户和权限
 cmdb_project   项目空间
 cmdb_asset     资产，必须关联一个项目
 cmdb_asset_type 资产类型下拉选项
+cmdb_region      洲、国家/地区、城市/区域三级字典
 cmdb_asset_change 资产变更记录
 cmdb_import_audit 导入审计主表
 cmdb_import_failure 导入失败行明细
@@ -154,7 +156,7 @@ cmdb_import_audit 1 ─── N cmdb_import_failure
 
 ### 5.3 启动时的数据库校验
 
-当前版本已接入 Flyway。首次启动会自动执行 `src/main/resources/db/migration` 下的迁移脚本；对已经存在旧表的数据库，配置了 `baseline-on-migrate`，会从现有结构建立基线后继续执行后续迁移。
+当前版本不在应用启动时执行数据库迁移。数据库结构统一由 `database/init.sql` 管理，应用启动时只校验实体与数据库表结构是否匹配。
 
 当前 `application.yaml` 使用：
 
@@ -174,13 +176,16 @@ spring:
 - 数据库账号是否有访问和读取表结构的权限。
 - 数据库表名、字段名是否被手工修改。
 
-如果希望手工完成本轮升级并插入演示数据，可以执行：
+如果希望在初始化时同时插入演示项目和 3 条资产样例，可以在同一个 SQL 会话中执行：
 
 ```sql
-source D:/workspace/cmdb/database/upgrade-v2-and-samples.sql;
+SET @CMDB_LOAD_SAMPLE_DATA = 1;
+source D:/workspace/cmdb/database/init.sql;
 ```
 
-该脚本会创建审计、导入失败明细和资产变更记录表，并插入 `演示项目` 及 3 条 `demo-*` 资产样例。脚本可以重复执行。
+已有数据库也可以重复执行 `init.sql` 补齐缺失的表和字典数据；脚本不会删除资产和业务数据。当前项目只保留这一份手工数据库脚本，后续表结构调整也需要同步更新 `init.sql`。
+
+区域字典按洲、国家/地区、城市/区域保存。项目内置常用国家、首都、主要城市和云服务区域；城市数量没有统一的“全部”边界，业务自定义城市可以继续向 `cmdb_region` 追加，`enabled=1` 后会自动出现在资产表单下拉中。
 
 ## 6. 应用配置
 
@@ -201,8 +206,6 @@ src/main/resources/application.yaml
 | `spring.datasource.username` | 数据库用户 | 建议使用最小权限账号 |
 | `spring.datasource.password` | 数据库密码 | 生产环境不要写入代码仓库 |
 | `spring.jpa.hibernate.ddl-auto` | JPA 表结构策略 | 当前为 `validate` |
-| `spring.flyway.enabled` | 是否启用 Flyway 迁移 | 默认启用 |
-| `spring.flyway.baseline-on-migrate` | 旧库接入迁移时是否自动建立基线 | 默认启用 |
 | `spring.servlet.multipart.max-file-size` | 单个上传文件大小 | `10MB` |
 | `spring.servlet.multipart.max-request-size` | 请求最大大小 | `10MB` |
 | `cmdb.jwt-secret` | 令牌签名密钥 | 生产必须更换为长随机值 |
@@ -496,7 +499,7 @@ Invoke-RestMethod -Uri 'http://localhost:8080/actuator/health/readiness'
 - IP：匹配内网 IP 和外网 IP。
 - 项目：按所属项目筛选。
 
-资产名称、类型、环境、状态和区域不参与列表搜索；区域直接在资产列表中展示。
+资产名称、类型、环境、状态和区域不参与列表搜索；区域直接在资产列表中展示。新建和编辑资产时，区域从洲、国家/地区、城市/区域三级下拉中选择；历史自由文本区域会作为兼容选项保留。
 
 资产清单支持服务端分页、排序和多条件筛选。点击资产名称可以打开资产详情页，详情页展示资产基础信息和最近 100 条变更记录。
 
@@ -563,14 +566,14 @@ CSV 模板也包含一行可复制修改的样例。两个模板使用相同的�
 | 6 | `主机名` | 否 | `web-01` | 主机名 |
 | 7 | `项目名称` | 是 | `默认项目` | 必须与系统中的项目名称一致 |
 | 8 | `状态` | 否 | `ONLINE` | 建议使用 `ONLINE`、`OFFLINE`、`MAINTENANCE` |
-| 9 | `区域` | 否 | `杭州` | 地域或机房区域 |
+| 9 | `区域` | 否 | `亚洲 / 中国 / 杭州` | 从洲、国家/地区、城市/区域三级字典选择 |
 | 10 | `描述` | 否 | `业务 Web 服务器` | 资产补充说明 |
 
 示例数据：
 
 ```csv
 名称,类型,环境,内网IP,外网IP,主机名,项目名称,状态,区域,描述
-web-01,SERVER,PRODUCTION,10.0.0.10,203.0.113.10,web-01,默认项目,ONLINE,杭州,业务 Web 服务器
+web-01,SERVER,PRODUCTION,10.0.0.10,203.0.113.10,web-01,默认项目,ONLINE,亚洲 / 中国 / 杭州,业务 Web 服务器
 ```
 
 ### 10.3 导入规则
@@ -653,6 +656,7 @@ Authorization: Bearer <token>
 | `GET` | `/api/assets/export.xlsx` | 导出 Excel，可选 `projectId`、`keyword` |
 | `GET` | `/api/assets/template.xlsx` | 下载带下拉选项和样例的 Excel 模板 |
 | `GET` | `/api/assets/types` | 查询启用的资产类型下拉选项 |
+| `GET` | `/api/assets/regions` | 查询启用的洲、国家/地区、城市/区域字典 |
 | `GET` | `/api/assets/imports` | 查询导入审计记录 |
 | `GET` | `/api/assets/imports/{id}/failures.csv` | 下载某次导入的失败行 CSV |
 
@@ -858,7 +862,7 @@ database/init.sql
 
 可以从以下位置确认：
 
-- 启动日志中会显示监听端口和 Flyway 校验结果。
+- 启动日志中会显示监听端口和 JPA 表结构校验结果。
 - `http://localhost:8080/actuator/health/readiness` 返回 `UP` 表示应用已就绪。
 - 如果数据库配置错误，启动日志会出现连接失败、认证失败或表结构校验失败。
 - 修改外置配置文件后需要重启应用，Spring Boot JAR 不会自动热加载生产配置。
@@ -882,7 +886,7 @@ database/init.sql
 - 资产、项目和用户删除流程的自动化测试。
 - CSV/Excel 导入成功、失败和重复数据场景的自动化测试。
 - 角色权限隔离的自动化测试。
-- 数据库迁移和生产部署测试。
+- 数据库初始化和生产部署测试。
 
 ## 16. 生产部署建议
 
@@ -894,7 +898,7 @@ database/init.sql
 4. 将自定义令牌替换为成熟的 JWT、OIDC 或企业统一认证。
 5. 关闭全开放 CORS，限制允许的来源。
 6. 在网关或 Nginx 层启用 HTTPS、限流和访问日志。
-7. 持续使用 Flyway 管理数据库结构变更，禁止生产环境手工改表后不同步迁移脚本。
+7. 数据库结构变更必须先更新 `database/init.sql`，再在测试库验证后发布。
 8. 增加数据库备份、恢复和数据保留策略。
 9. 增加后端接口测试、前端流程测试和导入数据校验。
 10. 将 Vue CDN 依赖改成本地构建资源，减少外部网络依赖。

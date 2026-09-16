@@ -212,7 +212,9 @@ const appTemplate = `
             <div class="field"><label>项目 *</label><select v-model="form.projectId" required><option v-for="project in projects" :value="project.id" :key="project.id">{{ project.name }}</option></select></div>
             <div class="field"><label>环境</label><select v-model="form.environment"><option value="PRODUCTION">生产环境</option><option value="STAGING">预发布环境</option><option value="DEVELOPMENT">开发环境</option></select></div>
             <div class="field"><label>状态</label><select v-model="form.status"><option value="ONLINE">在线</option><option value="OFFLINE">离线</option><option value="MAINTENANCE">维护中</option></select></div>
-            <div class="field"><label>区域</label><input v-model.trim="form.region" placeholder="杭州 / 华东"></div>
+            <div class="field"><label>洲</label><select v-model="regionDraft.continent" @change="onRegionContinentChange"><option value="">请选择</option><option v-for="continent in regionContinents" :value="continent" :key="continent">{{ continent }}</option></select></div>
+            <div class="field"><label>国家 / 地区</label><select v-model="regionDraft.country" @change="onRegionCountryChange" :disabled="!regionDraft.continent"><option value="">请选择</option><option v-for="country in regionCountries" :value="country" :key="country">{{ country }}</option></select></div>
+            <div class="field"><label>城市 / 区域</label><select v-model="form.region" :disabled="!regionDraft.country"><option value="">请选择</option><option v-if="form.region && !knownRegionValues.includes(form.region)" :value="form.region">{{ form.region }}</option><option v-for="item in regionCities" :value="item.label" :key="item.id">{{ item.region }}</option></select></div>
             <div class="field"><label>内网 IP</label><input v-model.trim="form.privateIp"></div>
             <div class="field"><label>外网 IP</label><input v-model.trim="form.publicIp"></div>
             <div class="field wide"><label>主机名</label><input v-model.trim="form.hostname"></div>
@@ -301,10 +303,11 @@ createApp({
       template: appTemplate,
       data() {
         return {
-          tab: 'overview', stats: {}, projects: [], assets: [], users: [], assetTypes: [],
+          tab: 'overview', stats: {}, projects: [], assets: [], users: [], assetTypes: [], regions: [],
           filters: { keyword: '', projectId: '' },
           assetPage: { page: 0, size: 10, totalElements: 0, totalPages: 0, sort: 'updatedAt', direction: 'desc' },
           imports: [], audits: [], detailAsset: null,
+          regionDraft: { continent: '', country: '' },
           showModal: false, modalType: '', editing: null, form: {}, loading: false, saving: false,
           notice: '', noticeType: 'success', importing: false
         };
@@ -315,6 +318,14 @@ createApp({
         userInitial() { return (this.user.displayName || this.user.username || 'U').substring(0, 1); },
         canManageUsers() { return this.user.role === 'ADMIN'; },
         canWrite() { return this.user.role === 'ADMIN' || this.user.role === 'OPERATOR'; },
+        regionContinents() { return [...new Set(this.regions.map(item => item.continent).filter(Boolean))]; },
+        regionCountries() {
+          return [...new Set(this.regions.filter(item => item.continent === this.regionDraft.continent).map(item => item.country).filter(Boolean))];
+        },
+        regionCities() {
+          return this.regions.filter(item => item.continent === this.regionDraft.continent && item.country === this.regionDraft.country);
+        },
+        knownRegionValues() { return this.regions.map(item => item.label); },
       },
       mounted() { this.load(); },
       methods: {
@@ -332,10 +343,11 @@ createApp({
         async load() {
           this.loading = true;
           try {
-            const [stats, projects, assetTypes] = await Promise.all([api('/dashboard'), api('/projects'), api('/assets/types')]);
+            const [stats, projects, assetTypes, regions] = await Promise.all([api('/dashboard'), api('/projects'), api('/assets/types'), api('/assets/regions')]);
             this.stats = stats;
             this.projects = projects;
             this.assetTypes = assetTypes;
+            this.regions = regions;
             await this.loadAssets();
             if (this.tab === 'users' && this.canManageUsers) this.users = await api('/users');
             if (this.tab === 'imports' && this.canWrite) await this.loadImports();
@@ -398,6 +410,7 @@ createApp({
             this.form = { currentPassword: '', newPassword: '', confirmPassword: '' };
           } else if (type === 'asset') {
             this.form = item ? { ...item } : { status: 'ONLINE', environment: 'PRODUCTION', projectId: this.projects[0] && this.projects[0].id };
+            this.syncRegionDraft(this.form.region);
           } else if (type === 'project') {
             this.form = item ? { name: item.name, code: item.code, owner: item.owner, description: item.description } : {};
           } else {
@@ -406,6 +419,18 @@ createApp({
           this.showModal = true;
         },
         close() { this.showModal = false; },
+        syncRegionDraft(value) {
+          const match = this.regions.find(item => item.label === value || item.region === value);
+          this.regionDraft = match ? { continent: match.continent, country: match.country } : { continent: '', country: '' };
+          if (match) this.form.region = match.label;
+        },
+        onRegionContinentChange() {
+          this.regionDraft.country = '';
+          this.form.region = '';
+        },
+        onRegionCountryChange() {
+          this.form.region = '';
+        },
         async save() {
           this.saving = true;
           try {
