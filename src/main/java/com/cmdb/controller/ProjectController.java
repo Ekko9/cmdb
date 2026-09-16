@@ -1,8 +1,10 @@
 package com.cmdb.controller;
 
+import com.cmdb.config.AuditService;
 import com.cmdb.entity.Project;
 import com.cmdb.repo.AssetRepository;
 import com.cmdb.repo.ProjectRepository;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
@@ -13,10 +15,12 @@ import java.util.*;
 public class ProjectController {
     private final ProjectRepository projects;
     private final AssetRepository assets;
+    private final AuditService auditService;
 
-    public ProjectController(ProjectRepository projects, AssetRepository assets) {
+    public ProjectController(ProjectRepository projects, AssetRepository assets, AuditService auditService) {
         this.projects = projects;
         this.assets = assets;
+        this.auditService = auditService;
     }
 
     @GetMapping
@@ -30,16 +34,18 @@ public class ProjectController {
     }
 
     @PostMapping
-    public Map<String, Object> create(@RequestBody Project form) {
+    public Map<String, Object> create(HttpServletRequest request, @RequestBody Project form) {
         validate(form);
         if (form.getCode() != null && projects.findByCode(form.getCode()).isPresent()) {
             throw new RuntimeException("项目编码已存在");
         }
-        return view(projects.save(form));
+        Project saved = projects.save(form);
+        auditService.operation(request, "CREATE", "PROJECT", saved.getId(), saved.getName(), "SUCCESS", "新增项目");
+        return view(saved);
     }
 
     @PutMapping("/{id}")
-    public Map<String, Object> update(@PathVariable Long id, @RequestBody Project form) {
+    public Map<String, Object> update(HttpServletRequest request, @PathVariable Long id, @RequestBody Project form) {
         validate(form);
         Project project = projects.findById(id).orElseThrow(() -> new RuntimeException("项目不存在"));
         if (form.getCode() != null) {
@@ -52,17 +58,20 @@ public class ProjectController {
         project.setCode(form.getCode());
         project.setOwner(form.getOwner());
         project.setDescription(form.getDescription());
-        return view(projects.save(project));
+        Project saved = projects.save(project);
+        auditService.operation(request, "UPDATE", "PROJECT", saved.getId(), saved.getName(), "SUCCESS", "编辑项目");
+        return view(saved);
     }
 
     @DeleteMapping("/{id}")
-    public void delete(@PathVariable Long id) {
+    public void delete(HttpServletRequest request, @PathVariable Long id) {
         Project project = projects.findById(id).orElseThrow(() -> new RuntimeException("项目不存在"));
         long assetCount = assets.countByProjectId(id);
         if (assetCount > 0) {
             throw new RuntimeException("项目下还有 " + assetCount + " 个资产，请先删除或迁移资产");
         }
         projects.delete(project);
+        auditService.operation(request, "DELETE", "PROJECT", id, project.getName(), "SUCCESS", "删除项目");
     }
 
     private void validate(Project form) {

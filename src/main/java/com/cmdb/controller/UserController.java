@@ -1,7 +1,9 @@
 package com.cmdb.controller;
 
+import com.cmdb.config.AuditService;
 import com.cmdb.entity.User;
 import com.cmdb.repo.UserRepository;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,10 +17,12 @@ public class UserController {
 
     private final UserRepository users;
     private final BCryptPasswordEncoder encoder;
+    private final AuditService auditService;
 
-    public UserController(UserRepository users, BCryptPasswordEncoder encoder) {
+    public UserController(UserRepository users, BCryptPasswordEncoder encoder, AuditService auditService) {
         this.users = users;
         this.encoder = encoder;
+        this.auditService = auditService;
     }
 
     @GetMapping
@@ -31,7 +35,7 @@ public class UserController {
     }
 
     @PostMapping
-    public Map<String, Object> create(@RequestBody Map<String, String> body) {
+    public Map<String, Object> create(HttpServletRequest request, @RequestBody Map<String, String> body) {
         String username = trimToNull(body.get("username"));
         if (username == null) throw new RuntimeException("用户名不能为空");
         if (users.findByUsername(username).isPresent()) throw new RuntimeException("用户名已存在");
@@ -42,11 +46,13 @@ public class UserController {
         user.setDisplayName(defaultText(body.get("displayName"), username));
         user.setRole(normalizeRole(body.get("role")));
         user.setEnabled(true);
-        return safe(users.save(user));
+        User saved = users.save(user);
+        auditService.operation(request, "CREATE", "USER", saved.getId(), saved.getUsername(), "SUCCESS", "新增用户");
+        return safe(saved);
     }
 
     @PutMapping("/{id}")
-    public Map<String, Object> update(@PathVariable Long id, @RequestBody Map<String, String> body) {
+    public Map<String, Object> update(HttpServletRequest request, @PathVariable Long id, @RequestBody Map<String, String> body) {
         User user = users.findById(id).orElseThrow(() -> new RuntimeException("用户不存在"));
         if (body.containsKey("displayName")) user.setDisplayName(defaultText(body.get("displayName"), user.getUsername()));
         if (body.containsKey("role")) user.setRole(normalizeRole(body.get("role")));
@@ -54,14 +60,17 @@ public class UserController {
         if (body.containsKey("password") && body.get("password") != null && !body.get("password").trim().isEmpty()) {
             user.setPassword(encoder.encode(requirePassword(body.get("password"))));
         }
-        return safe(users.save(user));
+        User saved = users.save(user);
+        auditService.operation(request, "UPDATE", "USER", saved.getId(), saved.getUsername(), "SUCCESS", "编辑用户");
+        return safe(saved);
     }
 
     @DeleteMapping("/{id}")
-    public void delete(@PathVariable Long id) {
+    public void delete(HttpServletRequest request, @PathVariable Long id) {
         User user = users.findById(id).orElseThrow(() -> new RuntimeException("用户不存在"));
         if ("admin".equalsIgnoreCase(user.getUsername())) throw new RuntimeException("admin 账号不允许删除");
         users.delete(user);
+        auditService.operation(request, "DELETE", "USER", id, user.getUsername(), "SUCCESS", "删除用户");
     }
 
     private String requirePassword(String password) {

@@ -50,6 +50,8 @@ const appTemplate = `
         <button type="button" :class="{active:tab==='overview'}" @click="go('overview')">总览</button>
         <button type="button" :class="{active:tab==='assets'}" @click="go('assets')">资产清单</button>
         <button type="button" :class="{active:tab==='projects'}" @click="go('projects')">项目空间</button>
+        <button v-if="canWrite" type="button" :class="{active:tab==='imports'}" @click="go('imports')">导入审计</button>
+        <button v-if="canManageUsers" type="button" :class="{active:tab==='audits'}" @click="go('audits')">操作审计</button>
         <button v-if="canManageUsers" type="button" :class="{active:tab==='users'}" @click="go('users')">用户权限</button>
       </nav>
       <div class="side-foot">CMDB · v1.0.0</div>
@@ -103,30 +105,59 @@ const appTemplate = `
             <h3>全部资产</h3>
             <p class="import-hint">导入支持 CSV 和 Excel（.xlsx）。Excel 模板支持下拉选择，CSV 文件不支持下拉列表。</p>
           </div>
-          <div class="toolbar">
-            <input v-model.trim="keyword" placeholder="搜索名称 / IP / 主机名">
-            <button class="ghost" type="button" @click="downloadTemplate">下载 Excel 模板</button>
-            <button class="ghost" type="button" @click="downloadCsv">导出 CSV</button>
-            <button class="ghost" type="button" @click="downloadExcel">导出 Excel</button>
-            <label v-if="canWrite" class="ghost file-btn">导入 CSV / Excel<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="importFile"></label>
-            <button v-if="canWrite" class="primary" type="button" @click="open('asset')" :disabled="!projects.length">+ 新建资产</button>
+          <div class="asset-toolbar">
+            <div class="search-box">
+              <input v-model.trim="filters.keyword" placeholder="搜索内网 IP / 外网 IP" @keyup.enter="searchAssets">
+              <select v-model="filters.projectId" @change="searchAssets"><option value="">全部项目</option><option v-for="project in projects" :value="String(project.id)" :key="project.id">{{ project.name }}</option></select>
+              <button class="primary" type="button" @click="searchAssets">搜索</button>
+            </div>
+            <div class="toolbar">
+              <button class="ghost" type="button" @click="downloadTemplate">下载 Excel 模板</button>
+              <button class="ghost" type="button" @click="downloadCsv">导出 CSV</button>
+              <button class="ghost" type="button" @click="downloadExcel">导出 Excel</button>
+              <label v-if="canWrite" class="ghost file-btn">导入 CSV / Excel<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="importFile"></label>
+              <button v-if="canWrite" class="primary" type="button" @click="open('asset')" :disabled="!projects.length">+ 新建资产</button>
+            </div>
           </div>
         </div>
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>资产名称</th><th>资产类型</th><th>项目</th><th>环境</th><th>内网 IP</th><th>外网 IP</th><th>状态</th><th v-if="canWrite">操作</th></tr></thead>
+            <thead><tr><th @click="setSort('name')">资产名称</th><th @click="setSort('assetType')">资产类型</th><th>项目</th><th @click="setSort('environment')">环境</th><th>内网 IP</th><th>外网 IP</th><th>区域</th><th @click="setSort('status')">状态</th><th v-if="canWrite">操作</th></tr></thead>
             <tbody>
-              <tr v-for="asset in filteredAssets" :key="asset.id">
-                <td><b>{{ asset.name }}</b><small class="sub-cell">{{ asset.hostname || '' }}</small></td>
+              <tr v-for="asset in assets" :key="asset.id">
+                <td><button class="link-btn" type="button" @click="openDetail(asset.id)"><b>{{ asset.name }}</b></button><small class="sub-cell">{{ asset.hostname || '' }}</small></td>
                 <td>{{ assetTypeLabel(asset.assetType) }}</td><td>{{ asset.projectName }}</td><td>{{ environmentLabel(asset.environment) }}</td>
-                <td>{{ asset.privateIp || '-' }}</td><td>{{ asset.publicIp || '-' }}</td>
+                <td>{{ asset.privateIp || '-' }}</td><td>{{ asset.publicIp || '-' }}</td><td>{{ asset.region || '-' }}</td>
                 <td><span :class="['pill', statusClass(asset.status)]">{{ statusLabel(asset.status) }}</span></td>
                 <td v-if="canWrite" class="actions"><button class="ghost action-edit" type="button" @click="open('asset', asset)">编辑</button><button class="ghost danger action-delete" type="button" @click="remove('assets', asset.id, asset.name)">删除</button></td>
               </tr>
-              <tr v-if="!filteredAssets.length"><td colspan="8" class="empty">没有匹配的资产</td></tr>
+              <tr v-if="!assets.length"><td colspan="9" class="empty">没有匹配的资产</td></tr>
             </tbody>
           </table>
         </div>
+        <div class="pager"><button class="ghost" type="button" @click="prevAssetPage" :disabled="assetPage.page<=0">上一页</button><span>第 {{ assetPage.page + 1 }} / {{ Math.max(assetPage.totalPages, 1) }} 页，共 {{ assetPage.totalElements }} 条</span><button class="ghost" type="button" @click="nextAssetPage" :disabled="assetPage.page + 1 >= assetPage.totalPages">下一页</button><select v-model.number="assetPage.size" @change="loadAssets"><option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option></select></div>
+      </section>
+
+      <section v-if="tab==='imports' && canWrite && !loading" class="panel">
+        <div class="section-head"><h3>导入审计</h3><button class="ghost" type="button" @click="loadImports">刷新</button></div>
+        <div class="table-wrap"><table class="table">
+          <thead><tr><th>文件名</th><th>类型</th><th>状态</th><th>总行数</th><th>成功</th><th>失败</th><th>操作人</th><th>时间</th><th>失败行</th></tr></thead>
+          <tbody>
+            <tr v-for="item in imports" :key="item.id"><td><b>{{ item.filename }}</b></td><td>{{ item.fileType }}</td><td>{{ importStatusLabel(item.status) }}</td><td>{{ item.totalRows }}</td><td>{{ item.successCount }}</td><td>{{ item.failedCount }}</td><td>{{ item.operator || '-' }}</td><td>{{ formatTime(item.createdAt) }}</td><td><button v-if="item.failedCount" class="ghost" type="button" @click="downloadImportFailures(item.id)">下载</button><span v-else>-</span></td></tr>
+            <tr v-if="!imports.length"><td colspan="9" class="empty">暂无导入记录</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section v-if="tab==='audits' && canManageUsers && !loading" class="panel">
+        <div class="section-head"><h3>操作审计日志</h3><button class="ghost" type="button" @click="loadAudits">刷新</button></div>
+        <div class="table-wrap"><table class="table">
+          <thead><tr><th>时间</th><th>操作人</th><th>角色</th><th>动作</th><th>资源</th><th>结果</th><th>来源 IP</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr v-for="item in audits" :key="item.id"><td>{{ formatTime(item.createdAt) }}</td><td>{{ item.operator || '-' }}</td><td>{{ roleLabel(item.role) }}</td><td>{{ actionLabel(item.action) }}</td><td>{{ resourceLabel(item.resourceType) }} / {{ item.resourceName || item.resourceId || '-' }}</td><td>{{ item.result }}</td><td>{{ item.clientIp || '-' }}</td><td>{{ item.message || '-' }}</td></tr>
+            <tr v-if="!audits.length"><td colspan="8" class="empty">暂无审计日志</td></tr>
+          </tbody>
+        </table></div>
       </section>
 
       <section v-if="tab==='projects' && !loading" class="panel">
@@ -204,6 +235,32 @@ const appTemplate = `
         <div class="modal-actions"><button class="ghost" type="button" @click="close">取消</button><button class="primary" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存' }}</button></div>
       </form>
     </div>
+
+    <div v-if="detailAsset" class="drawer-back" @click.self="detailAsset=null">
+      <aside class="drawer">
+        <div class="section-head"><h3>{{ detailAsset.name }}</h3><button class="ghost close" type="button" @click="detailAsset=null">×</button></div>
+        <div class="detail-grid">
+          <div><small>项目</small><b>{{ detailAsset.projectName }}</b></div>
+          <div><small>类型</small><b>{{ assetTypeLabel(detailAsset.assetType) }}</b></div>
+          <div><small>环境</small><b>{{ environmentLabel(detailAsset.environment) }}</b></div>
+          <div><small>状态</small><b>{{ statusLabel(detailAsset.status) }}</b></div>
+          <div><small>内网 IP</small><b>{{ detailAsset.privateIp || '-' }}</b></div>
+          <div><small>外网 IP</small><b>{{ detailAsset.publicIp || '-' }}</b></div>
+          <div><small>主机名</small><b>{{ detailAsset.hostname || '-' }}</b></div>
+          <div><small>区域</small><b>{{ detailAsset.region || '-' }}</b></div>
+        </div>
+        <p class="detail-desc">{{ detailAsset.description || '暂无描述' }}</p>
+        <h4>变更记录</h4>
+        <div class="timeline">
+          <div v-for="change in detailAsset.changes || []" :key="change.id" class="timeline-item">
+            <b>{{ changeTypeLabel(change.changeType) }} {{ change.fieldName ? fieldLabel(change.fieldName) : '' }}</b>
+            <span>{{ formatTime(change.createdAt) }} · {{ change.operator || '-' }}</span>
+            <small v-if="change.fieldName">{{ change.oldValue || '-' }} → {{ change.newValue || '-' }}</small>
+          </div>
+          <div v-if="!detailAsset.changes || !detailAsset.changes.length" class="empty">暂无变更记录</div>
+        </div>
+      </aside>
+    </div>
   </div>`;
 
 createApp({
@@ -244,21 +301,20 @@ createApp({
       template: appTemplate,
       data() {
         return {
-          tab: 'overview', stats: {}, projects: [], assets: [], users: [], assetTypes: [], keyword: '',
+          tab: 'overview', stats: {}, projects: [], assets: [], users: [], assetTypes: [],
+          filters: { keyword: '', projectId: '' },
+          assetPage: { page: 0, size: 10, totalElements: 0, totalPages: 0, sort: 'updatedAt', direction: 'desc' },
+          imports: [], audits: [], detailAsset: null,
           showModal: false, modalType: '', editing: null, form: {}, loading: false, saving: false,
           notice: '', noticeType: 'success', importing: false
         };
       },
       computed: {
-        title() { return { overview: '资产总览', assets: '资产清单', projects: '项目空间', users: '用户与权限' }[this.tab]; },
+        title() { return { overview: '资产总览', assets: '资产清单', projects: '项目空间', imports: '导入审计', audits: '操作审计', users: '用户与权限' }[this.tab]; },
         user() { return this.$root.user || {}; },
         userInitial() { return (this.user.displayName || this.user.username || 'U').substring(0, 1); },
         canManageUsers() { return this.user.role === 'ADMIN'; },
         canWrite() { return this.user.role === 'ADMIN' || this.user.role === 'OPERATOR'; },
-        filteredAssets() {
-          const query = this.keyword.toLowerCase();
-          return this.assets.filter(asset => !query || [asset.name, asset.privateIp, asset.publicIp, asset.hostname, asset.assetType, this.assetTypeLabel(asset.assetType), this.environmentLabel(asset.environment), this.statusLabel(asset.status)].join(' ').toLowerCase().includes(query));
-        }
       },
       mounted() { this.load(); },
       methods: {
@@ -266,16 +322,24 @@ createApp({
         environmentLabel(value) { return { PRODUCTION: '生产环境', STAGING: '预发布环境', DEVELOPMENT: '开发环境' }[value] || value || '-'; },
         statusLabel(value) { return { ONLINE: '在线', OFFLINE: '离线', MAINTENANCE: '维护中' }[value] || value || '-'; },
         roleLabel(value) { return { ADMIN: '管理员', OPERATOR: '运维人员', VIEWER: '只读用户' }[value] || value || '-'; },
+        importStatusLabel(value) { return { SUCCESS: '成功', PARTIAL: '部分成功', FAILED: '失败', RUNNING: '处理中' }[value] || value || '-'; },
+        actionLabel(value) { return { CREATE: '新增', UPDATE: '编辑', DELETE: '删除', IMPORT: '导入', CHANGE_PASSWORD: '修改密码' }[value] || value || '-'; },
+        resourceLabel(value) { return { ASSET: '资产', PROJECT: '项目', USER: '用户', ACCOUNT: '账号' }[value] || value || '-'; },
+        changeTypeLabel(value) { return { CREATE: '创建', UPDATE: '更新', DELETE: '删除', IMPORT: '导入' }[value] || value || '-'; },
+        fieldLabel(value) { return { name: '名称', assetType: '类型', environment: '环境', privateIp: '内网 IP', publicIp: '外网 IP', hostname: '主机名', status: '状态', region: '区域', description: '描述', projectName: '项目' }[value] || value; },
+        formatTime(value) { return value ? String(value).replace('T', ' ').substring(0, 19) : '-'; },
         statusClass(value) { return value === 'OFFLINE' ? 'off' : value === 'MAINTENANCE' ? 'maintenance' : ''; },
         async load() {
           this.loading = true;
           try {
-            const [stats, projects, assets, assetTypes] = await Promise.all([api('/dashboard'), api('/projects'), api('/assets'), api('/assets/types')]);
+            const [stats, projects, assetTypes] = await Promise.all([api('/dashboard'), api('/projects'), api('/assets/types')]);
             this.stats = stats;
             this.projects = projects;
-            this.assets = assets;
             this.assetTypes = assetTypes;
+            await this.loadAssets();
             if (this.tab === 'users' && this.canManageUsers) this.users = await api('/users');
+            if (this.tab === 'imports' && this.canWrite) await this.loadImports();
+            if (this.tab === 'audits' && this.canManageUsers) await this.loadAudits();
           } catch (error) {
             this.notify(error.message, 'error');
           } finally {
@@ -284,9 +348,44 @@ createApp({
         },
         async go(tab) {
           if (tab === 'users' && !this.canManageUsers) return;
+          if (tab === 'audits' && !this.canManageUsers) return;
+          if (tab === 'imports' && !this.canWrite) return;
           this.tab = tab;
           await this.load();
         },
+        async loadAssets() {
+          const params = new URLSearchParams();
+          Object.entries(this.filters).forEach(([key, value]) => { if (value !== '' && value !== null && value !== undefined) params.set(key, value); });
+          params.set('page', this.assetPage.page);
+          params.set('size', this.assetPage.size);
+          params.set('sort', this.assetPage.sort);
+          params.set('direction', this.assetPage.direction);
+          const data = await api('/assets?' + params.toString());
+          this.assets = data.content || [];
+          this.assetPage = { ...this.assetPage, page: data.page || 0, size: data.size || this.assetPage.size, totalElements: data.totalElements || 0, totalPages: data.totalPages || 0 };
+        },
+        async loadImports() {
+          const data = await api('/assets/imports');
+          this.imports = data.content || [];
+        },
+        async loadAudits() {
+          const data = await api('/audits');
+          this.audits = data.content || [];
+        },
+        async openDetail(id) {
+          this.detailAsset = await api('/assets/' + id);
+        },
+        async searchAssets() {
+          this.assetPage.page = 0;
+          await this.loadAssets();
+        },
+        async setSort(field) {
+          if (this.assetPage.sort === field) this.assetPage.direction = this.assetPage.direction === 'asc' ? 'desc' : 'asc';
+          else { this.assetPage.sort = field; this.assetPage.direction = 'asc'; }
+          await this.loadAssets();
+        },
+        async prevAssetPage() { if (this.assetPage.page > 0) { this.assetPage.page--; await this.loadAssets(); } },
+        async nextAssetPage() { if (this.assetPage.page + 1 < this.assetPage.totalPages) { this.assetPage.page++; await this.loadAssets(); } },
         logout() {
           localStorage.clear();
           this.$root.token = '';
@@ -356,13 +455,24 @@ createApp({
           }
         },
         async downloadCsv() {
-          await this.downloadFile('/assets/export', 'cmdb-assets.csv', 'CSV 已导出');
+          await this.downloadFile('/assets/export' + this.filterQuery(), 'cmdb-assets.csv', 'CSV 已导出');
         },
         async downloadExcel() {
-          await this.downloadFile('/assets/export.xlsx', 'cmdb-assets.xlsx', 'Excel 已导出');
+          await this.downloadFile('/assets/export.xlsx' + this.filterQuery(), 'cmdb-assets.xlsx', 'Excel 已导出');
         },
         async downloadTemplate() {
           await this.downloadFile('/assets/template.xlsx', 'cmdb-asset-import-template.xlsx', 'Excel 模板已下载');
+        },
+        async downloadImportFailures(id) {
+          await this.downloadFile('/assets/imports/' + id + '/failures.csv', 'cmdb-import-failures-' + id + '.csv', '失败行已导出');
+        },
+        filterQuery() {
+          const params = new URLSearchParams();
+          Object.entries(this.filters).forEach(([key, value]) => {
+            if (value !== '' && value !== null && value !== undefined) params.set(key, value);
+          });
+          const query = params.toString();
+          return query ? '?' + query : '';
         },
         async downloadFile(path, filename, message) {
           try {

@@ -17,7 +17,8 @@ public class AuthInterceptor implements HandlerInterceptor {
     }
 
     @Override public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        if (HttpMethod.OPTIONS.matches(request.getMethod()) || request.getRequestURI().startsWith("/api/auth") || !request.getRequestURI().startsWith("/api/")) return true;
+        String uri = request.getRequestURI();
+        if (HttpMethod.OPTIONS.matches(request.getMethod()) || uri.startsWith("/api/auth") || uri.startsWith("/actuator/") || !uri.startsWith("/api/")) return true;
         String header = request.getHeader("Authorization");
         String username = header != null && header.startsWith("Bearer ") ? tokenService.username(header.substring(7)) : null;
         if (username == null) { response.setStatus(401); response.setContentType("application/json;charset=UTF-8"); response.getWriter().write("{\"message\":\"登录已失效\"}"); return false; }

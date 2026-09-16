@@ -1,10 +1,18 @@
 package com.cmdb.controller;
 
+import com.cmdb.config.AuditService;
 import com.cmdb.entity.Asset;
 import com.cmdb.entity.AssetTypeOption;
+import com.cmdb.entity.ImportAudit;
+import com.cmdb.entity.ImportFailure;
 import com.cmdb.repo.AssetRepository;
 import com.cmdb.repo.AssetTypeOptionRepository;
+import com.cmdb.repo.AssetChangeRepository;
+import com.cmdb.repo.ImportAuditRepository;
+import com.cmdb.repo.ImportFailureRepository;
 import com.cmdb.repo.ProjectRepository;
+import jakarta.persistence.criteria.JoinType;
+import jakarta.servlet.http.HttpServletRequest;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVPrinter;
@@ -17,12 +25,15 @@ import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.data.domain.*;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.*;
 
 @RestController
@@ -31,45 +42,94 @@ public class AssetController {
     private final AssetRepository assets;
     private final ProjectRepository projects;
     private final AssetTypeOptionRepository assetTypes;
+    private final AssetChangeRepository assetChanges;
+    private final ImportAuditRepository importAudits;
+    private final ImportFailureRepository importFailures;
+    private final AuditService auditService;
 
-    public AssetController(AssetRepository assets, ProjectRepository projects, AssetTypeOptionRepository assetTypes) {
+    public AssetController(AssetRepository assets, ProjectRepository projects, AssetTypeOptionRepository assetTypes,
+                           AssetChangeRepository assetChanges, ImportAuditRepository importAudits,
+                           ImportFailureRepository importFailures, AuditService auditService) {
         this.assets = assets;
         this.projects = projects;
         this.assetTypes = assetTypes;
+        this.assetChanges = assetChanges;
+        this.importAudits = importAudits;
+        this.importFailures = importFailures;
+        this.auditService = auditService;
     }
 
     @GetMapping
     @Transactional(readOnly = true)
-    public List<Map<String, Object>> list(@RequestParam(required = false) Long projectId,
-                                          @RequestParam(required = false) String keyword) {
-        List<Asset> all = projectId == null ? assets.findAll() : assets.findByProjectId(projectId);
-        String query = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
-        List<Map<String, Object>> result = new ArrayList<>();
-        for (Asset asset : all) {
-            if (query.isEmpty() || searchable(asset).contains(query)) {
-                result.add(view(asset));
-            }
+    public Map<String, Object> list(@RequestParam(required = false) Long projectId,
+                                    @RequestParam(required = false) String keyword,
+                                    @RequestParam(defaultValue = "0") int page,
+                                    @RequestParam(defaultValue = "10") int size,
+                                    @RequestParam(defaultValue = "updatedAt") String sort,
+                                    @RequestParam(defaultValue = "desc") String direction) {
+        Pageable pageable = PageRequest.of(Math.max(0, page), Math.min(Math.max(1, size), 100), order(sort, direction));
+        Page<Asset> assetPage = assets.findAll(spec(projectId, keyword), pageable);
+        List<Map<String, Object>> content = new ArrayList<>();
+        for (Asset asset : assetPage.getContent()) content.add(view(asset));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", content);
+        result.put("page", assetPage.getNumber());
+        result.put("size", assetPage.getSize());
+        result.put("totalElements", assetPage.getTotalElements());
+        result.put("totalPages", assetPage.getTotalPages());
+        result.put("sort", sort);
+        result.put("direction", direction);
+        return result;
+    }
+
+    @GetMapping("/{id}")
+    @Transactional(readOnly = true)
+    public Map<String, Object> detail(@PathVariable Long id) {
+        Asset asset = assets.findById(id).orElseThrow(() -> new RuntimeException("资产不存在"));
+        Map<String, Object> result = view(asset);
+        List<Map<String, Object>> changes = new ArrayList<>();
+        for (com.cmdb.entity.AssetChange change : assetChanges.findTop100ByAssetIdOrderByCreatedAtDescIdDesc(id)) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", change.getId());
+            item.put("changeType", change.getChangeType());
+            item.put("fieldName", change.getFieldName());
+            item.put("oldValue", change.getOldValue());
+            item.put("newValue", change.getNewValue());
+            item.put("operator", change.getOperator());
+            item.put("createdAt", change.getCreatedAt());
+            changes.add(item);
         }
+        result.put("changes", changes);
         return result;
     }
 
     @PostMapping
     @Transactional
-    public Map<String, Object> create(@RequestBody Map<String, Object> body) {
-        return view(assets.save(from(body, new Asset())));
+    public Map<String, Object> create(HttpServletRequest request, @RequestBody Map<String, Object> body) {
+        Asset asset = assets.save(from(body, new Asset()));
+        auditService.assetChange(asset.getId(), asset.getName(), "CREATE", null, null, snapshot(asset), auditService.operator(request));
+        auditService.operation(request, "CREATE", "ASSET", asset.getId(), asset.getName(), "SUCCESS", "新增资产");
+        return view(asset);
     }
 
     @PutMapping("/{id}")
     @Transactional
-    public Map<String, Object> update(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+    public Map<String, Object> update(HttpServletRequest request, @PathVariable Long id, @RequestBody Map<String, Object> body) {
         Asset asset = assets.findById(id).orElseThrow(() -> new RuntimeException("资产不存在"));
-        return view(assets.save(from(body, asset)));
+        Map<String, String> before = snapshotMap(asset);
+        Asset saved = assets.save(from(body, asset));
+        recordAssetDiff(saved, before, auditService.operator(request));
+        auditService.operation(request, "UPDATE", "ASSET", saved.getId(), saved.getName(), "SUCCESS", "编辑资产");
+        return view(saved);
     }
 
     @DeleteMapping("/{id}")
-    public void delete(@PathVariable Long id) {
+    @Transactional
+    public void delete(HttpServletRequest request, @PathVariable Long id) {
         Asset asset = assets.findById(id).orElseThrow(() -> new RuntimeException("资产不存在"));
+        auditService.assetChange(asset.getId(), asset.getName(), "DELETE", null, snapshot(asset), null, auditService.operator(request));
         assets.delete(asset);
+        auditService.operation(request, "DELETE", "ASSET", id, asset.getName(), "SUCCESS", "删除资产");
     }
 
     @GetMapping("/types")
@@ -80,29 +140,74 @@ public class AssetController {
 
     @PostMapping("/import")
     @Transactional
-    public Map<String, Object> importCsv(@RequestParam("file") MultipartFile file) throws IOException {
+    public Map<String, Object> importCsv(HttpServletRequest request, @RequestParam("file") MultipartFile file) throws IOException {
         if (file == null || file.isEmpty()) {
             throw new RuntimeException("请选择 CSV 或 Excel 文件");
         }
         String filename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename().toLowerCase(Locale.ROOT);
-        if (filename.endsWith(".xlsx")) return importExcel(file);
-        if (!filename.endsWith(".csv")) throw new RuntimeException("仅支持 .csv 或 .xlsx 文件");
-        return importCsvFile(file);
+        ImportAudit audit = new ImportAudit();
+        audit.setFilename(file.getOriginalFilename() == null ? "unknown" : file.getOriginalFilename());
+        audit.setFileType(filename.endsWith(".xlsx") ? "XLSX" : filename.endsWith(".csv") ? "CSV" : "UNKNOWN");
+        audit.setOperator(auditService.operator(request));
+        audit = importAudits.save(audit);
+        Map<String, Object> result;
+        if (filename.endsWith(".xlsx")) result = importExcel(request, file, audit);
+        else {
+            if (!filename.endsWith(".csv")) throw new RuntimeException("仅支持 .csv 或 .xlsx 文件");
+            result = importCsvFile(request, file, audit);
+        }
+        auditService.operation(request, "IMPORT", "ASSET", audit.getId(), audit.getFilename(), "SUCCESS",
+                "导入成功 " + result.get("count") + " 条，失败 " + result.get("skipped") + " 条");
+        return result;
     }
 
-    private Map<String, Object> importCsvFile(MultipartFile file) throws IOException {
+    @GetMapping("/imports")
+    @Transactional(readOnly = true)
+    public Map<String, Object> imports(@RequestParam(defaultValue = "0") int page,
+                                       @RequestParam(defaultValue = "10") int size) {
+        Page<ImportAudit> auditPage = importAudits.findAllByOrderByCreatedAtDescIdDesc(
+                PageRequest.of(Math.max(0, page), Math.min(Math.max(1, size), 100)));
+        List<Map<String, Object>> content = new ArrayList<>();
+        for (ImportAudit audit : auditPage.getContent()) content.add(importView(audit));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", content);
+        result.put("page", auditPage.getNumber());
+        result.put("size", auditPage.getSize());
+        result.put("totalElements", auditPage.getTotalElements());
+        result.put("totalPages", auditPage.getTotalPages());
+        return result;
+    }
+
+    @GetMapping("/imports/{id}/failures.csv")
+    @Transactional(readOnly = true)
+    public ResponseEntity<byte[]> importFailures(@PathVariable Long id) throws IOException {
+        ImportAudit audit = importAudits.findById(id).orElseThrow(() -> new RuntimeException("导入记录不存在"));
+        StringWriter writer = new StringWriter();
+        CSVFormat format = CSVFormat.DEFAULT.builder().setHeader("行号", "失败原因", "原始数据").build();
+        try (CSVPrinter printer = new CSVPrinter(writer, format)) {
+            for (ImportFailure failure : importFailures.findByImportAuditOrderByRowNumberAscIdAsc(audit)) {
+                printer.printRecord(failure.getRowNumber(), failure.getReason(), failure.getRawData());
+            }
+        }
+        return fileResponse(("\uFEFF" + writer).getBytes(StandardCharsets.UTF_8),
+                "cmdb-import-failures-" + id + ".csv", "text/csv;charset=UTF-8");
+    }
+
+    private Map<String, Object> importCsvFile(HttpServletRequest request, MultipartFile file, ImportAudit audit) throws IOException {
         int imported = 0;
         int skipped = 0;
+        int totalRows = 0;
         List<String> errors = new ArrayList<>();
         CSVFormat format = CSVFormat.DEFAULT.builder().setSkipHeaderRecord(true).setHeader()
                 .setTrim(true).build();
         try (Reader reader = new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8);
              CSVParser parser = new CSVParser(reader, format)) {
             for (CSVRecord record : parser) {
+                totalRows++;
                 long line = record.getRecordNumber() + 1;
                 if (record.size() < 7) {
                     skipped++;
-                    errors.add("第 " + line + " 行字段不足，至少需要 7 列");
+                    addImportFailure(audit, (int) line, "字段不足，至少需要 7 列", record.toString(), errors);
                     continue;
                 }
                 try {
@@ -117,30 +222,30 @@ public class AssetController {
                     body.put("status", record.size() > 7 ? record.get(7) : "ONLINE");
                     body.put("region", record.size() > 8 ? record.get(8) : null);
                     body.put("description", record.size() > 9 ? record.get(9) : null);
-                    assets.save(from(body, new Asset()));
+                    Asset asset = assets.save(from(body, new Asset()));
+                    auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
                 } catch (RuntimeException ex) {
                     skipped++;
-                    errors.add("第 " + line + " 行：" + ex.getMessage());
+                    addImportFailure(audit, (int) line, ex.getMessage(), record.toString(), errors);
                 }
             }
         }
-        return importResult(imported, skipped, errors);
+        finishImport(audit, totalRows, imported, skipped);
+        return importResult(audit.getId(), imported, skipped, errors);
     }
 
     @GetMapping("/export")
     @Transactional(readOnly = true)
     public ResponseEntity<byte[]> exportCsv(@RequestParam(required = false) Long projectId,
                                             @RequestParam(required = false) String keyword) throws IOException {
-        List<Asset> all = projectId == null ? assets.findAll() : assets.findByProjectId(projectId);
-        String query = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+        List<Asset> all = assets.findAll(spec(projectId, keyword), Sort.by(Sort.Direction.DESC, "updatedAt"));
         StringWriter writer = new StringWriter();
         CSVFormat format = CSVFormat.DEFAULT.builder()
                 .setHeader("名称", "类型", "环境", "内网IP", "外网IP", "主机名", "项目名称", "状态", "区域", "描述")
                 .build();
         try (CSVPrinter printer = new CSVPrinter(writer, format)) {
             for (Asset asset : all) {
-                if (!query.isEmpty() && !searchable(asset).contains(query)) continue;
                 printer.printRecord(asset.getName(), asset.getAssetType(), asset.getEnvironment(),
                         asset.getPrivateIp(), asset.getPublicIp(), asset.getHostname(),
                         asset.getProject().getName(), asset.getStatus(), asset.getRegion(), asset.getDescription());
@@ -156,15 +261,13 @@ public class AssetController {
     @Transactional(readOnly = true)
     public ResponseEntity<byte[]> exportExcel(@RequestParam(required = false) Long projectId,
                                               @RequestParam(required = false) String keyword) throws IOException {
-        List<Asset> all = projectId == null ? assets.findAll() : assets.findByProjectId(projectId);
-        String query = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+        List<Asset> all = assets.findAll(spec(projectId, keyword), Sort.by(Sort.Direction.DESC, "updatedAt"));
         try (Workbook workbook = new XSSFWorkbook(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             Sheet sheet = workbook.createSheet("资产清单");
             String[] headers = {"名称", "类型", "环境", "内网IP", "外网IP", "主机名", "项目名称", "状态", "区域", "描述"};
             writeHeader(workbook, sheet, headers);
             int rowIndex = 1;
             for (Asset asset : all) {
-                if (!query.isEmpty() && !searchable(asset).contains(query)) continue;
                 Row row = sheet.createRow(rowIndex++);
                 writeCell(row, 0, asset.getName());
                 writeCell(row, 1, asset.getAssetType());
@@ -261,9 +364,10 @@ public class AssetController {
         return asset;
     }
 
-    private Map<String, Object> importExcel(MultipartFile file) throws IOException {
+    private Map<String, Object> importExcel(HttpServletRequest request, MultipartFile file, ImportAudit audit) throws IOException {
         int imported = 0;
         int skipped = 0;
+        int totalRows = 0;
         List<String> errors = new ArrayList<>();
         try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
             Sheet sheet = workbook.getSheetAt(0);
@@ -271,6 +375,7 @@ public class AssetController {
             for (int i = 1; i <= sheet.getLastRowNum(); i++) {
                 Row row = sheet.getRow(i);
                 if (row == null || isBlank(row, formatter)) continue;
+                totalRows++;
                 try {
                     Map<String, Object> body = new HashMap<>();
                     body.put("name", cell(row, 0, formatter));
@@ -283,23 +388,51 @@ public class AssetController {
                     body.put("status", cell(row, 7, formatter));
                     body.put("region", cell(row, 8, formatter));
                     body.put("description", cell(row, 9, formatter));
-                    assets.save(from(body, new Asset()));
+                    Asset asset = assets.save(from(body, new Asset()));
+                    auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
                 } catch (RuntimeException ex) {
                     skipped++;
-                    errors.add("第 " + (i + 1) + " 行：" + ex.getMessage());
+                    addImportFailure(audit, i + 1, ex.getMessage(), rowData(row, formatter), errors);
                 }
             }
         }
-        return importResult(imported, skipped, errors);
+        finishImport(audit, totalRows, imported, skipped);
+        return importResult(audit.getId(), imported, skipped, errors);
     }
 
-    private Map<String, Object> importResult(int imported, int skipped, List<String> errors) {
+    private Map<String, Object> importResult(Long importId, int imported, int skipped, List<String> errors) {
         Map<String, Object> result = new LinkedHashMap<>();
+        result.put("importId", importId);
         result.put("count", imported);
         result.put("skipped", skipped);
         result.put("errors", errors);
         return result;
+    }
+
+    private void addImportFailure(ImportAudit audit, int rowNumber, String reason, String rawData, List<String> errors) {
+        ImportFailure failure = new ImportFailure();
+        failure.setImportAudit(audit);
+        failure.setRowNumber(rowNumber);
+        failure.setReason(reason == null ? "导入失败" : reason);
+        failure.setRawData(rawData == null || rawData.length() <= 2000 ? rawData : rawData.substring(0, 2000));
+        importFailures.save(failure);
+        errors.add("第 " + rowNumber + " 行：" + failure.getReason());
+    }
+
+    private void finishImport(ImportAudit audit, int totalRows, int imported, int skipped) {
+        audit.setTotalRows(totalRows);
+        audit.setSuccessCount(imported);
+        audit.setFailedCount(skipped);
+        audit.setStatus(skipped == 0 ? "SUCCESS" : imported == 0 ? "FAILED" : "PARTIAL");
+        audit.setCompletedAt(LocalDateTime.now());
+        importAudits.save(audit);
+    }
+
+    private String rowData(Row row, DataFormatter formatter) {
+        List<String> values = new ArrayList<>();
+        for (int i = 0; i < 10; i++) values.add(cell(row, i, formatter));
+        return String.join(",", values);
     }
 
     private boolean isBlank(Row row, DataFormatter formatter) {
@@ -398,6 +531,74 @@ public class AssetController {
 
     private String safe(String value) {
         return value == null ? "" : value;
+    }
+
+    private Sort order(String sort, String direction) {
+        Set<String> allowed = new HashSet<>(Arrays.asList("name", "assetType", "environment", "status", "region", "updatedAt", "createdAt"));
+        String property = allowed.contains(sort) ? sort : "updatedAt";
+        Sort.Direction dir = "asc".equalsIgnoreCase(direction) ? Sort.Direction.ASC : Sort.Direction.DESC;
+        return Sort.by(dir, property);
+    }
+
+    private Specification<Asset> spec(Long projectId, String keyword) {
+        return (root, query, builder) -> {
+            if (query.getResultType() != Long.class && query.getResultType() != long.class) {
+                root.fetch("project", JoinType.LEFT);
+                query.distinct(true);
+            }
+            List<jakarta.persistence.criteria.Predicate> predicates = new ArrayList<>();
+            if (projectId != null) predicates.add(builder.equal(root.get("project").get("id"), projectId));
+            String q = keyword == null ? "" : keyword.trim().toLowerCase(Locale.ROOT);
+            if (!q.isEmpty()) {
+                String like = "%" + q + "%";
+                predicates.add(builder.or(
+                        builder.like(builder.lower(root.get("privateIp")), like),
+                        builder.like(builder.lower(root.get("publicIp")), like)
+                ));
+            }
+            return builder.and(predicates.toArray(new jakarta.persistence.criteria.Predicate[0]));
+        };
+    }
+
+    private void recordAssetDiff(Asset asset, Map<String, String> before, String operator) {
+        Map<String, String> after = snapshotMap(asset);
+        for (String field : after.keySet()) {
+            auditService.assetChange(asset.getId(), asset.getName(), "UPDATE", field, before.get(field), after.get(field), operator);
+        }
+    }
+
+    private String snapshot(Asset asset) {
+        return snapshotMap(asset).toString();
+    }
+
+    private Map<String, String> snapshotMap(Asset asset) {
+        Map<String, String> result = new LinkedHashMap<>();
+        result.put("name", asset.getName());
+        result.put("assetType", asset.getAssetType());
+        result.put("environment", asset.getEnvironment());
+        result.put("privateIp", asset.getPrivateIp());
+        result.put("publicIp", asset.getPublicIp());
+        result.put("hostname", asset.getHostname());
+        result.put("status", asset.getStatus());
+        result.put("region", asset.getRegion());
+        result.put("description", asset.getDescription());
+        result.put("projectName", asset.getProject() == null ? null : asset.getProject().getName());
+        return result;
+    }
+
+    private Map<String, Object> importView(ImportAudit audit) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", audit.getId());
+        result.put("filename", audit.getFilename());
+        result.put("fileType", audit.getFileType());
+        result.put("status", audit.getStatus());
+        result.put("totalRows", audit.getTotalRows());
+        result.put("successCount", audit.getSuccessCount());
+        result.put("failedCount", audit.getFailedCount());
+        result.put("operator", audit.getOperator());
+        result.put("createdAt", audit.getCreatedAt());
+        result.put("completedAt", audit.getCompletedAt());
+        return result;
     }
 
     private Map<String, Object> view(Asset asset) {

@@ -26,19 +26,29 @@ public class AuthorizationService {
     public boolean isAllowed(HttpServletRequest request, String role) {
         String path = request.getRequestURI();
         String method = request.getMethod().toUpperCase(Locale.ROOT);
-        if (path.startsWith("/api/users")) {
+        if (path.startsWith("/api/users") || path.startsWith("/api/audits")) {
             return "ADMIN".equalsIgnoreCase(role);
         }
         if (path.startsWith("/api/account/password")) {
             return "PUT".equals(method);
         }
+        if (path.startsWith("/api/assets/import") && "POST".equals(method)) {
+            return canOperate(role);
+        }
+        if (path.startsWith("/api/assets/imports") && method.startsWith("GET")) {
+            return "ADMIN".equalsIgnoreCase(role) || "OPERATOR".equalsIgnoreCase(role);
+        }
         if (!isWrite(method)) {
             return true;
         }
         if (path.startsWith("/api/assets") || path.startsWith("/api/projects")) {
-            return "ADMIN".equalsIgnoreCase(role) || "OPERATOR".equalsIgnoreCase(role);
+            return canOperate(role);
         }
         return false;
+    }
+
+    private boolean canOperate(String role) {
+        return "ADMIN".equalsIgnoreCase(role) || "OPERATOR".equalsIgnoreCase(role);
     }
 
     private boolean isWrite(String method) {

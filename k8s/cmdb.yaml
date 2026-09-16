@@ -33,6 +33,10 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: cmdb
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: "8080"
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
@@ -79,6 +83,12 @@ spec:
                 secretKeyRef:
                   name: cmdb-runtime
                   key: ADMIN_PASSWORD
+            - name: LOG_FILE
+              value: /tmp/logs/cmdb.log
+            - name: LOG_MAX_FILE_SIZE
+              value: 20MB
+            - name: LOG_MAX_HISTORY
+              value: "14"
             - name: JAVA_TOOL_OPTIONS
               value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
           startupProbe:

@@ -1,5 +1,6 @@
 package com.cmdb.controller;
 
+import com.cmdb.config.AuditService;
 import com.cmdb.entity.User;
 import com.cmdb.repo.UserRepository;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,10 +16,12 @@ public class AccountController {
 
     private final UserRepository users;
     private final BCryptPasswordEncoder encoder;
+    private final AuditService auditService;
 
-    public AccountController(UserRepository users, BCryptPasswordEncoder encoder) {
+    public AccountController(UserRepository users, BCryptPasswordEncoder encoder, AuditService auditService) {
         this.users = users;
         this.encoder = encoder;
+        this.auditService = auditService;
     }
 
     @PutMapping("/password")
@@ -43,5 +46,6 @@ public class AccountController {
         }
         user.setPassword(encoder.encode(newPassword));
         users.save(user);
+        auditService.operation(request, "CHANGE_PASSWORD", "ACCOUNT", user.getId(), user.getUsername(), "SUCCESS", "用户自助修改密码");
     }
 }

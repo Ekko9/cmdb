@@ -30,7 +30,7 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 
 - 新建、编辑和删除资产。
 - 支持资产类型、环境、状态、区域、内网 IP、外网 IP、主机名和描述。
-- 支持按资产名称、IP、主机名、资产类型、环境、状态和区域搜索。
+- 支持按内网 IP、外网 IP 和项目筛选资产。
 - 支持 CSV 和 Excel（`.xlsx`）批量导入。
 - 支持 CSV 和 Excel（`.xlsx`）导出。
 
@@ -58,7 +58,7 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 | CSV | Apache Commons CSV 1.10.0 |
 | 打包方式 | Spring Boot Fat JAR |
 | 容器化 | Docker、Docker Compose、Kubernetes |
-| 健康检查 | Spring Boot Actuator liveness/readiness |
+| 健康检查 | Spring Boot Actuator liveness/readiness、metrics、Prometheus |
 
 ## 3. 项目目录
 
@@ -66,6 +66,7 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 cmdb/
 ├─ database/
 │  ├─ init.sql                    # 数据库、表和索引初始化脚本
+│  ├─ upgrade-v2-and-samples.sql  # V2 手工升级和资产样例数据脚本
 │  ├─ asset-import-template.csv  # 资产导入 CSV 模板，包含样例
 │  └─ asset-import-template.xlsx # 资产导入 Excel 模板，包含下拉选项和样例
 ├─ src/
@@ -130,6 +131,7 @@ source D:/workspace/cmdb/database/init.sql;
 5. 创建 `cmdb_asset_type` 资产类型选项表并写入默认类型。
 6. 创建项目与资产之间的外键关系。
 7. 创建常用查询索引。
+8. 创建资产变更记录、导入审计、导入失败明细和操作审计日志表。
 
 脚本使用 `CREATE DATABASE IF NOT EXISTS` 和 `CREATE TABLE IF NOT EXISTS`，重复执行不会重复创建已有对象。
 
@@ -140,12 +142,19 @@ sys_user       用户和权限
 cmdb_project   项目空间
 cmdb_asset     资产，必须关联一个项目
 cmdb_asset_type 资产类型下拉选项
+cmdb_asset_change 资产变更记录
+cmdb_import_audit 导入审计主表
+cmdb_import_failure 导入失败行明细
+cmdb_operation_audit 操作审计日志
 
 cmdb_project 1 ─── N cmdb_asset
 cmdb_asset_type 1 ─── N cmdb_asset（通过类型编码使用）
+cmdb_import_audit 1 ─── N cmdb_import_failure
 ```
 
 ### 5.3 启动时的数据库校验
+
+当前版本已接入 Flyway。首次启动会自动执行 `src/main/resources/db/migration` 下的迁移脚本；对已经存在旧表的数据库，配置了 `baseline-on-migrate`，会从现有结构建立基线后继续执行后续迁移。
 
 当前 `application.yaml` 使用：
 
@@ -165,13 +174,23 @@ spring:
 - 数据库账号是否有访问和读取表结构的权限。
 - 数据库表名、字段名是否被手工修改。
 
+如果希望手工完成本轮升级并插入演示数据，可以执行：
+
+```sql
+source D:/workspace/cmdb/database/upgrade-v2-and-samples.sql;
+```
+
+该脚本会创建审计、导入失败明细和资产变更记录表，并插入 `演示项目` 及 3 条 `demo-*` 资产样例。脚本可以重复执行。
+
 ## 6. 应用配置
 
-配置文件为：
+项目内置配置文件为：
 
 ```text
 src/main/resources/application.yaml
 ```
+
+该文件只保留可提交到仓库的默认值和占位值。实际部署时优先使用环境变量或外置配置文件覆盖数据库地址、数据库账号、数据库密码、令牌密钥和初始管理员密码。
 
 主要配置项如下：
 
@@ -179,31 +198,131 @@ src/main/resources/application.yaml
 | --- | --- | --- |
 | `server.port` | Web 服务端口 | 默认 `8080` |
 | `spring.datasource.url` | MySQL JDBC 地址 | 指向 `cmdb` 数据库 |
-| `spring.datasource.username` | 数据库用户 | 当前为本机开发配置 |
-| `spring.datasource.password` | 数据库密码 | 仅保存在本机配置，不写入本文档 |
+| `spring.datasource.username` | 数据库用户 | 建议使用最小权限账号 |
+| `spring.datasource.password` | 数据库密码 | 生产环境不要写入代码仓库 |
 | `spring.jpa.hibernate.ddl-auto` | JPA 表结构策略 | 当前为 `validate` |
+| `spring.flyway.enabled` | 是否启用 Flyway 迁移 | 默认启用 |
+| `spring.flyway.baseline-on-migrate` | 旧库接入迁移时是否自动建立基线 | 默认启用 |
 | `spring.servlet.multipart.max-file-size` | 单个上传文件大小 | `10MB` |
 | `spring.servlet.multipart.max-request-size` | 请求最大大小 | `10MB` |
-| `cmdb.jwt-secret` | 令牌签名密钥 | 本机开发配置，生产必须更换 |
+| `cmdb.jwt-secret` | 令牌签名密钥 | 生产必须更换为长随机值 |
 | `cmdb.jwt-expire-hours` | 令牌有效时长 | 默认 `12` 小时 |
 | `cmdb.initial-admin-password` | 首次创建管理员时使用的密码 | 通过 `ADMIN_PASSWORD` 提供 |
-| `management.endpoints.web.exposure.include` | 暴露健康检查接口 | `health,info` |
+| `management.endpoints.web.exposure.include` | 暴露健康和监控接口 | `health,info,metrics,prometheus` |
+| `logging.file.name` | 应用日志文件 | 默认 `logs/cmdb.log` |
+| `logging.logback.rollingpolicy.max-file-size` | 单个日志文件大小 | 默认 `20MB` |
+| `logging.logback.rollingpolicy.max-history` | 日志保留文件数 | 默认 `14` |
 
 仓库中的 `application.yaml` 只保留安全占位值。启动时请通过环境变量、密钥管理服务或部署平台的加密配置提供真实数据库连接信息和令牌密钥，避免把真实密码提交到代码仓库。
 
-PowerShell 示例：
+### 6.1 环境变量覆盖
+
+Spring Boot 会自动读取环境变量。推荐在裸机、Docker 和 Kubernetes 中使用以下变量：
+
+| 环境变量 | 对应配置 | 示例 |
+| --- | --- | --- |
+| `SERVER_PORT` | `server.port` | `8080` |
+| `DB_URL` | `spring.datasource.url` | `jdbc:mysql://mysql-host:3306/cmdb?...` |
+| `DB_USERNAME` | `spring.datasource.username` | `cmdb_app` |
+| `DB_PASSWORD` | `spring.datasource.password` | 数据库密码 |
+| `JWT_SECRET` | `cmdb.jwt-secret` | 长随机字符串 |
+| `JWT_EXPIRE_HOURS` | `cmdb.jwt-expire-hours` | `12` |
+| `ADMIN_PASSWORD` | `cmdb.initial-admin-password` | 首次安装管理员密码 |
+| `LOG_FILE` | `logging.file.name` | `logs/cmdb.log` |
+| `LOG_MAX_FILE_SIZE` | `logging.logback.rollingpolicy.max-file-size` | `20MB` |
+| `LOG_MAX_HISTORY` | `logging.logback.rollingpolicy.max-history` | `14` |
+
+Windows PowerShell 示例：
 
 ```powershell
 $env:DB_URL = 'jdbc:mysql://your-mysql-host:3306/cmdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true'
 $env:DB_USERNAME = 'cmdb_app'
 $env:DB_PASSWORD = 'replace-with-your-password'
 $env:JWT_SECRET = 'replace-with-a-long-random-secret'
-& 'D:\jude\jdk17\bin\java.exe' -jar 'target\cmdb-1.0.0.jar'
+$env:ADMIN_PASSWORD = 'replace-with-a-strong-initial-admin-password'
 ```
 
-## 7. 启动方式
+Linux 示例：
 
-### 7.1 使用已打包 JAR 启动
+```bash
+export DB_URL='jdbc:mysql://your-mysql-host:3306/cmdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true'
+export DB_USERNAME='cmdb_app'
+export DB_PASSWORD='replace-with-your-password'
+export JWT_SECRET='replace-with-a-long-random-secret'
+export ADMIN_PASSWORD='replace-with-a-strong-initial-admin-password'
+```
+
+### 6.2 外置配置文件覆盖
+
+也可以在 JAR 同级目录放置外置配置文件，例如：
+
+```text
+D:\deploy\cmdb\application-prod.yaml
+```
+
+推荐内容如下：
+
+```yaml
+server:
+  port: 8080
+spring:
+  datasource:
+    url: jdbc:mysql://your-mysql-host:3306/cmdb?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: cmdb_app
+    password: replace-with-your-password
+cmdb:
+  jwt-secret: replace-with-a-long-random-secret
+  jwt-expire-hours: 12
+  initial-admin-password: replace-with-a-strong-initial-admin-password
+logging:
+  file:
+    name: logs/cmdb.log
+```
+
+启动时通过 `--spring.config.additional-location` 指定这个外置文件：
+
+```powershell
+& 'D:\jude\jdk17\bin\java.exe' `
+  -jar 'D:\deploy\cmdb\cmdb-1.0.0.jar' `
+  --spring.config.additional-location='file:D:/deploy/cmdb/application-prod.yaml'
+```
+
+注意：外置配置文件中可能包含数据库密码，不要提交到 Git，也不要放在公开共享目录。
+
+## 7. 裸机部署和启动
+
+裸机部署指不使用 Docker，直接在服务器上安装 JDK 17 并运行 Spring Boot JAR。适合 Windows Server、Linux 虚拟机或物理机。
+
+### 7.1 部署目录建议
+
+建议按下面的结构放置文件：
+
+```text
+D:\deploy\cmdb\
+├─ cmdb-1.0.0.jar
+├─ application-prod.yaml
+└─ logs\
+```
+
+Linux 可使用：
+
+```text
+/opt/cmdb/
+├─ cmdb-1.0.0.jar
+├─ application-prod.yaml
+└─ logs/
+```
+
+### 7.2 裸机部署步骤
+
+1. 安装 JDK 17。
+2. 安装并准备 MySQL 5.7+。
+3. 执行 `database/init.sql` 初始化数据库。
+4. 将 `target/cmdb-1.0.0.jar` 复制到部署目录。
+5. 在部署目录创建 `application-prod.yaml`，填写真实数据库连接、令牌密钥和初始管理员密码。
+6. 启动应用并检查健康状态。
+
+### 7.3 使用已打包 JAR 前台启动
 
 项目当前可直接启动的产物为：
 
@@ -211,11 +330,21 @@ $env:JWT_SECRET = 'replace-with-a-long-random-secret'
 D:\workspace\cmdb\target\cmdb-1.0.0.jar
 ```
 
-PowerShell 启动命令：
+Windows PowerShell 启动命令：
 
 ```powershell
 & 'D:\jude\jdk17\bin\java.exe' `
-  -jar 'D:\workspace\cmdb\target\cmdb-1.0.0.jar'
+  -jar 'D:\workspace\cmdb\target\cmdb-1.0.0.jar' `
+  --spring.config.additional-location='file:D:/deploy/cmdb/application-prod.yaml'
+```
+
+如果只使用环境变量，不使用外置配置文件，可以省略 `--spring.config.additional-location`。
+
+Linux 启动命令：
+
+```bash
+java -jar /opt/cmdb/cmdb-1.0.0.jar \
+  --spring.config.additional-location=file:/opt/cmdb/application-prod.yaml
 ```
 
 启动成功后访问：
@@ -224,7 +353,66 @@ PowerShell 启动命令：
 http://localhost:8080/
 ```
 
-### 7.2 使用 Maven 重新打包
+### 7.4 Windows 后台启动
+
+PowerShell 示例：
+
+```powershell
+$app = 'D:\deploy\cmdb'
+$java = 'D:\jude\jdk17\bin\java.exe'
+$jar = Join-Path $app 'cmdb-1.0.0.jar'
+$stdout = Join-Path $app 'logs\cmdb.stdout.log'
+$stderr = Join-Path $app 'logs\cmdb.stderr.log'
+
+New-Item -ItemType Directory -Force -Path (Join-Path $app 'logs') | Out-Null
+Start-Process -FilePath $java `
+  -ArgumentList @('-jar', $jar, '--spring.config.additional-location=file:D:/deploy/cmdb/application-prod.yaml') `
+  -WorkingDirectory $app `
+  -RedirectStandardOutput $stdout `
+  -RedirectStandardError $stderr `
+  -WindowStyle Hidden
+```
+
+查看进程：
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -like '*cmdb-1.0.0.jar*' } |
+  Select-Object ProcessId,CommandLine
+```
+
+停止进程：
+
+```powershell
+Stop-Process -Id <ProcessId>
+```
+
+### 7.5 Linux 后台启动
+
+临时后台启动：
+
+```bash
+cd /opt/cmdb
+nohup java -jar cmdb-1.0.0.jar \
+  --spring.config.additional-location=file:/opt/cmdb/application-prod.yaml \
+  > logs/cmdb.stdout.log 2> logs/cmdb.stderr.log &
+```
+
+查看进程：
+
+```bash
+ps -ef | grep cmdb-1.0.0.jar
+```
+
+停止进程：
+
+```bash
+kill <pid>
+```
+
+生产环境建议使用 `systemd`、Windows 服务包装器或进程守护工具托管应用，保证开机自启、失败拉起和统一日志采集。
+
+### 7.6 使用 Maven 重新打包
 
 ```powershell
 $env:JAVA_HOME = 'D:\jude\jdk17'
@@ -239,7 +427,7 @@ target/cmdb-1.0.0.jar
 
 项目当前还没有完整的自动化测试用例，`-DskipTests` 只表示跳过测试执行，不代表代码不需要回归验证。
 
-### 7.3 检查服务是否启动
+### 7.7 检查服务是否启动
 
 检查 8080 端口：
 
@@ -247,7 +435,19 @@ target/cmdb-1.0.0.jar
 Get-NetTCPConnection -LocalPort 8080 -State Listen
 ```
 
-如果端口已监听，打开浏览器访问 `http://localhost:8080/`。
+检查首页：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8080/'
+```
+
+检查健康状态：
+
+```powershell
+Invoke-RestMethod -Uri 'http://localhost:8080/actuator/health/readiness'
+```
+
+如果端口已监听且健康检查返回 `UP`，打开浏览器访问 `http://localhost:8080/`。
 
 ## 8. 首次登录
 
@@ -291,16 +491,14 @@ Get-NetTCPConnection -LocalPort 8080 -State Listen
 
 资产名称和项目为必填字段。资产编辑时可以修改已有字段，但资产仍必须关联有效项目。
 
-搜索框支持以下内容：
+资产搜索区只保留两个维度：
 
-- 资产名称。
-- 内网 IP。
-- 外网 IP。
-- 主机名。
-- 资产类型。
-- 环境。
-- 状态。
-- 区域。
+- IP：匹配内网 IP 和外网 IP。
+- 项目：按所属项目筛选。
+
+资产名称、类型、环境、状态和区域不参与列表搜索；区域直接在资产列表中展示。
+
+资产清单支持服务端分页、排序和多条件筛选。点击资产名称可以打开资产详情页，详情页展示资产基础信息和最近 100 条变更记录。
 
 ### 9.4 用户权限
 
@@ -321,9 +519,12 @@ Get-NetTCPConnection -LocalPort 8080 -State Listen
 | 功能 | ADMIN | OPERATOR | VIEWER |
 | --- | --- | --- | --- |
 | 查看总览、项目、资产 | 允许 | 允许 | 允许 |
+| 查看资产详情和变更记录 | 允许 | 允许 | 允许 |
 | 导出资产、下载模板 | 允许 | 允许 | 允许 |
 | 新增、编辑、删除项目和资产 | 允许 | 允许 | 禁止 |
 | 导入资产 | 允许 | 允许 | 禁止 |
+| 查看导入审计和下载失败行 | 允许 | 允许 | 禁止 |
+| 查看操作审计日志 | 允许 | 禁止 | 禁止 |
 | 查看、新增、编辑、删除用户 | 允许 | 禁止 | 禁止 |
 
 ## 10. 资产导入导出
@@ -381,6 +582,8 @@ web-01,SERVER,PRODUCTION,10.0.0.10,203.0.113.10,web-01,默认项目,ONLINE,杭�
 - 少于 7 列的行会被跳过。
 - 未填写状态时默认使用 `ONLINE`。
 - 导入结果会显示成功数量、跳过数量和错误行信息。
+- 每次导入都会写入导入审计记录。
+- 导入失败行会保存行号、失败原因和原始数据，可在“导入审计”页面下载 CSV。
 - 当前实现不会根据名称自动更新已有资产，重复导入会创建新记录。
 
 ### 10.4 页面操作
@@ -391,7 +594,7 @@ web-01,SERVER,PRODUCTION,10.0.0.10,203.0.113.10,web-01,默认项目,ONLINE,杭�
 - 点击“导入文件”选择 `.csv` 或 `.xlsx` 文件。
 - 点击“导出 CSV”下载 CSV 格式资产清单。
 - 点击“导出 Excel”下载 Excel 格式资产清单。
-- 搜索框有内容时，导出结果只包含匹配的资产。
+- 导出会沿用资产列表当前的 IP 搜索和项目筛选条件，只导出当前筛选结果；未设置筛选条件时导出全部资产。
 - `.xlsx` 模板支持项目、资产类型、环境和状态下拉选择。
 - `.csv` 文件支持导入和导出，但 CSV 格式本身不支持下拉列表；需要下拉选择时请使用 Excel 模板。
 
@@ -440,7 +643,8 @@ Authorization: Bearer <token>
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/assets` | 查询资产，可选 `projectId`、`keyword` |
+| `GET` | `/api/assets` | 查询资产，可选 `projectId`、`keyword`；`keyword` 仅匹配内网 IP 和外网 IP |
+| `GET` | `/api/assets/{id}` | 查询资产详情和变更记录 |
 | `POST` | `/api/assets` | 新建资产 |
 | `PUT` | `/api/assets/{id}` | 编辑资产 |
 | `DELETE` | `/api/assets/{id}` | 删除资产 |
@@ -449,6 +653,8 @@ Authorization: Bearer <token>
 | `GET` | `/api/assets/export.xlsx` | 导出 Excel，可选 `projectId`、`keyword` |
 | `GET` | `/api/assets/template.xlsx` | 下载带下拉选项和样例的 Excel 模板 |
 | `GET` | `/api/assets/types` | 查询启用的资产类型下拉选项 |
+| `GET` | `/api/assets/imports` | 查询导入审计记录 |
+| `GET` | `/api/assets/imports/{id}/failures.csv` | 下载某次导入的失败行 CSV |
 
 ### 11.5 用户
 
@@ -458,6 +664,12 @@ Authorization: Bearer <token>
 | `POST` | `/api/users` | 新建用户 |
 | `PUT` | `/api/users/{id}` | 编辑用户 |
 | `DELETE` | `/api/users/{id}` | 删除用户；用户名为 `admin` 的账号不允许删除 |
+
+### 11.6 审计
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/audits` | 查询操作审计日志，仅管理员可访问 |
 
 ## 12. Docker 运行
 
@@ -526,6 +738,7 @@ docker run -d --name orbit-cmdb -p 8080:8080 \
 - Maven 依赖单独缓存，修改 Java 源码时可以复用依赖层。
 - 运行容器使用非 root 用户。
 - 容器文件系统设置为只读，`/tmp` 使用临时文件系统。
+- 日志默认写入 `/tmp/logs/cmdb.log` 并按大小滚动，容器平台也可以直接采集标准输出。
 - Compose 不负责初始化数据库，也不会创建或管理 MySQL 容器。
 - 数据库表结构仍需提前通过 `database/init.sql` 初始化。
 
@@ -566,6 +779,7 @@ kubectl get service cmdb
 - 只读根文件系统和内存临时目录。
 - CPU、内存请求与限制。
 - 禁止自动挂载 ServiceAccount Token。
+- 暴露 Prometheus 抓取注解，默认抓取 `/actuator/prometheus`。
 
 本地没有执行 Docker 镜像构建；需要部署到 Kubernetes 时，使用 CI/CD 或具备 Docker/BuildKit 的构建环境根据 `Dockerfile` 构建并推送镜像。
 
@@ -574,9 +788,11 @@ kubectl get service cmdb
 ```text
 GET /actuator/health/liveness
 GET /actuator/health/readiness
+GET /actuator/metrics
+GET /actuator/prometheus
 ```
 
-接口仅用于容器和 Kubernetes 探针，不返回数据库连接细节。
+健康检查和监控接口不返回数据库连接密码等敏感信息。生产环境建议在网关层限制监控接口来源。
 
 ## 14. 常见问题
 
@@ -603,7 +819,12 @@ Get-NetTCPConnection -LocalPort 8080 -State Listen
 database/init.sql
 ```
 
-然后确认 `application.yaml` 连接的数据库名称为 `cmdb`。
+然后确认实际生效的配置连接的是 `cmdb` 数据库。裸机部署时优先检查：
+
+- 启动命令是否带了正确的 `--spring.config.additional-location`，并且路径指向实际存在的外置配置文件。
+- 外置 `application-prod.yaml` 中的 `spring.datasource.url` 是否指向 `cmdb`。
+- 环境变量 `DB_URL` 是否覆盖了配置文件。
+- MySQL 账号是否有当前数据库的表结构读取权限。
 
 ### 14.3 登录提示用户名或密码错误
 
@@ -633,6 +854,15 @@ database/init.sql
 
 当前页面通过 CDN 加载 Vue 3。如果浏览器所在网络无法访问 `unpkg.com`，页面脚本可能无法执行。生产环境建议将 Vue 前端依赖改为本地构建或本地静态资源。
 
+### 14.7 裸机部署如何确认配置已生效
+
+可以从以下位置确认：
+
+- 启动日志中会显示监听端口和 Flyway 校验结果。
+- `http://localhost:8080/actuator/health/readiness` 返回 `UP` 表示应用已就绪。
+- 如果数据库配置错误，启动日志会出现连接失败、认证失败或表结构校验失败。
+- 修改外置配置文件后需要重启应用，Spring Boot JAR 不会自动热加载生产配置。
+
 ## 15. 当前验证状态
 
 已完成以下验证：
@@ -640,6 +870,7 @@ database/init.sql
 - Maven 打包成功。
 - Java 17 JAR 启动成功。
 - 8080 端口正常监听。
+- README 已补充裸机部署、外置配置文件、前台/后台启动、停止和健康检查说明。
 - 管理员登录成功。
 - 总览、资产清单、项目空间和用户权限页面可访问。
 - 资产、项目和用户新建表单可打开。
@@ -649,8 +880,8 @@ database/init.sql
 当前仍建议继续补充：
 
 - 资产、项目和用户删除流程的自动化测试。
-- CSV 导入成功、失败和重复数据场景测试。
-- 角色权限隔离测试。
+- CSV/Excel 导入成功、失败和重复数据场景的自动化测试。
+- 角色权限隔离的自动化测试。
 - 数据库迁移和生产部署测试。
 
 ## 16. 生产部署建议
@@ -663,17 +894,14 @@ database/init.sql
 4. 将自定义令牌替换为成熟的 JWT、OIDC 或企业统一认证。
 5. 关闭全开放 CORS，限制允许的来源。
 6. 在网关或 Nginx 层启用 HTTPS、限流和访问日志。
-7. 使用 Flyway 或 Liquibase 管理数据库结构变更。
+7. 持续使用 Flyway 管理数据库结构变更，禁止生产环境手工改表后不同步迁移脚本。
 8. 增加数据库备份、恢复和数据保留策略。
 9. 增加后端接口测试、前端流程测试和导入数据校验。
 10. 将 Vue CDN 依赖改成本地构建资源，减少外部网络依赖。
 
 ## 17. 后续迭代方向
 
-- 资产详情页和资产变更记录。
-- 分页、排序和多条件筛选。
-- 批量导入失败行下载和导入审计。
-- 更细的角色与资源权限矩阵。
-- 数据库迁移版本管理。
-- 操作审计日志。
-- 健康检查、日志滚动和监控指标。
+- 更丰富的资产关系拓扑和生命周期状态流转。
+- 导入预校验、重复资产合并策略和失败行在线修正。
+- 审计日志高级筛选、导出和长期归档。
+- 指标告警规则、日志采集面板和容量趋势分析。
