@@ -86,7 +86,8 @@ INSERT IGNORE INTO `cmdb_asset_type` (`code`, `sort_order`, `enabled`) VALUES
   ('APPLICATION', 50, 1),
   ('OTHER', 60, 1);
 
--- The application creates admin/admin123 on first startup through DataInitializer.
+-- The application creates the admin account on first startup.
+-- Set ADMIN_PASSWORD to a strong password before first startup.
 -- Optional starter project:
 -- INSERT INTO `cmdb_project` (`name`, `code`, `owner`, `description`)
 -- VALUES ('默认项目', 'DEFAULT', '系统管理员', 'CMDB 默认项目空间');

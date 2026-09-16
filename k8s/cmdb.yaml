@@ -11,6 +11,7 @@ stringData:
   DB_USERNAME: cmdb_app
   DB_PASSWORD: replace-with-database-password
   JWT_SECRET: replace-with-a-long-random-secret
+  ADMIN_PASSWORD: replace-with-a-strong-initial-admin-password
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -73,6 +74,11 @@ spec:
                 secretKeyRef:
                   name: cmdb-runtime
                   key: JWT_SECRET
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cmdb-runtime
+                  key: ADMIN_PASSWORD
             - name: JAVA_TOOL_OPTIONS
               value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
           startupProbe:

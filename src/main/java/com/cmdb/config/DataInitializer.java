@@ -8,16 +8,19 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.beans.factory.annotation.Value;
 
 @Configuration
 public class DataInitializer {
+    @Value("${cmdb.initial-admin-password}") private String initialAdminPassword;
+
     @Bean public BCryptPasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(); }
     @Bean public CommandLineRunner init(UserRepository users, ProjectRepository projects, BCryptPasswordEncoder encoder) {
         return args -> {
             if (!users.findByUsername("admin").isPresent()) {
                 User user = new User();
                 user.setUsername("admin");
-                user.setPassword(encoder.encode("admin123"));
+                user.setPassword(encoder.encode(initialAdminPassword));
                 user.setDisplayName("系统管理员");
                 user.setRole("ADMIN");
                 user.setEnabled(true);

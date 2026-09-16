@@ -2,7 +2,7 @@
 
 Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management Database），用于统一维护项目、基础设施资产和用户权限。
 
-当前版本为 `1.0.0`，后端使用 Spring Boot 2.7.18，前端使用 Vue 3，数据访问使用 Spring Data JPA，数据库使用 MySQL 5.7+。应用内置前端页面，打包后只需要启动一个 Java 服务即可访问。
+当前版本为 `1.0.0`，后端使用 Spring Boot 3.3.13，运行环境为 JDK 17，前端使用 Vue 3，数据访问使用 Spring Data JPA，数据库使用 MySQL 5.7+。应用内置前端页面，打包后只需要启动一个 Java 服务即可访问。
 
 ## 1. 功能概览
 
@@ -12,12 +12,12 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 - 使用 HMAC-SHA256 签名令牌访问受保护接口。
 - 令牌默认有效期为 12 小时。
 - 支持三种角色：
-  - `ADMIN`：管理员，当前页面可进入用户权限模块。
-  - `OPERATOR`：运维人员，角色字段已支持。
-  - `VIEWER`：只读用户，角色字段已支持。
+  - `ADMIN`：管理员，可管理用户、项目和资产。
+  - `OPERATOR`：运维人员，可新增、编辑、删除和导入项目/资产，不能管理用户。
+  - `VIEWER`：只读用户，只能查看、导出和下载模板。
 - 用户可以启用或停用，停用用户无法登录。
 
-当前版本已经在页面层隐藏非管理员的“用户权限”入口，但项目和资产接口的细粒度角色授权仍待完善。上线前不要仅依赖前端按钮隐藏来实现安全隔离。
+后端拦截器会按角色校验 `/api/users`、`/api/projects` 和 `/api/assets` 请求；前端按钮隐藏仅用于改善操作体验，不能替代服务端授权。
 
 ### 1.2 项目空间
 
@@ -48,8 +48,8 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 
 | 分类 | 选型 |
 | --- | --- |
-| 后端框架 | Spring Boot 2.7.18、Spring MVC |
-| 开发语言 | Java 8 |
+| 后端框架 | Spring Boot 3.3.13、Spring MVC |
+| 开发语言 | Java 17 |
 | ORM | Spring Data JPA、Hibernate |
 | 数据库 | MySQL 5.7+ |
 | 密码加密 | BCrypt |
@@ -90,7 +90,7 @@ cmdb/
 
 ### 4.1 最低要求
 
-- JDK 8 或更高版本。
+- JDK 17 或更高版本。
 - Maven 3.8 或更高版本。
 - MySQL 5.7 或更高版本。
 - 浏览器：Chrome、Edge 或其他现代浏览器。
@@ -103,7 +103,7 @@ cmdb/
 | 组件 | 路径 |
 | --- | --- |
 | 项目目录 | `D:\workspace\cmdb` |
-| JDK 8 | `D:\jude\jdk8` |
+| JDK 17 | `D:\jude\jdk17` |
 | Maven | `D:\jude\maven` |
 | Maven 本地仓库 | `D:\jude\maven-repository` |
 
@@ -186,6 +186,7 @@ src/main/resources/application.yaml
 | `spring.servlet.multipart.max-request-size` | 请求最大大小 | `10MB` |
 | `cmdb.jwt-secret` | 令牌签名密钥 | 本机开发配置，生产必须更换 |
 | `cmdb.jwt-expire-hours` | 令牌有效时长 | 默认 `12` 小时 |
+| `cmdb.initial-admin-password` | 首次创建管理员时使用的密码 | 通过 `ADMIN_PASSWORD` 提供 |
 | `management.endpoints.web.exposure.include` | 暴露健康检查接口 | `health,info` |
 
 仓库中的 `application.yaml` 只保留安全占位值。启动时请通过环境变量、密钥管理服务或部署平台的加密配置提供真实数据库连接信息和令牌密钥，避免把真实密码提交到代码仓库。
@@ -197,7 +198,7 @@ $env:DB_URL = 'jdbc:mysql://your-mysql-host:3306/cmdb?useUnicode=true&characterE
 $env:DB_USERNAME = 'cmdb_app'
 $env:DB_PASSWORD = 'replace-with-your-password'
 $env:JWT_SECRET = 'replace-with-a-long-random-secret'
-& 'D:\jude\jdk8\bin\java.exe' -jar 'target\cmdb-1.0.0.jar'
+& 'D:\jude\jdk17\bin\java.exe' -jar 'target\cmdb-1.0.0.jar'
 ```
 
 ## 7. 启动方式
@@ -213,7 +214,7 @@ D:\workspace\cmdb\target\cmdb-1.0.0.jar
 PowerShell 启动命令：
 
 ```powershell
-& 'D:\jude\jdk8\bin\java.exe' `
+& 'D:\jude\jdk17\bin\java.exe' `
   -jar 'D:\workspace\cmdb\target\cmdb-1.0.0.jar'
 ```
 
@@ -226,7 +227,7 @@ http://localhost:8080/
 ### 7.2 使用 Maven 重新打包
 
 ```powershell
-$env:JAVA_HOME = 'D:\jude\jdk8'
+$env:JAVA_HOME = 'D:\jude\jdk17'
 & 'D:\jude\maven\bin\mvn.cmd' clean package -DskipTests
 ```
 
@@ -253,7 +254,7 @@ Get-NetTCPConnection -LocalPort 8080 -State Listen
 首次启动时，`DataInitializer` 会自动创建以下数据：
 
 - 管理员账号：`admin`
-- 初始密码：`admin123`
+- 首次安装会创建管理员账号；登录后请立即通过“修改密码”设置符合密码策略的新密码。
 - 默认角色：`ADMIN`
 - 默认项目：`默认项目`
 - 默认项目编码：`DEFAULT`
@@ -310,8 +311,20 @@ Get-NetTCPConnection -LocalPort 8080 -State Listen
 3. 可以设置显示名称和角色。
 4. 编辑用户时可以修改显示名称、角色、启用状态和密码。
 5. 停用用户无法继续登录。
+6. `admin` 是系统保留账号，不允许删除。
+7. 每个已登录用户都可以通过“修改密码”更新自己的密码；非管理员不能访问用户权限管理接口。
 
 当前页面只向前端返回用户基本信息，不返回密码哈希。
+
+权限矩阵：
+
+| 功能 | ADMIN | OPERATOR | VIEWER |
+| --- | --- | --- | --- |
+| 查看总览、项目、资产 | 允许 | 允许 | 允许 |
+| 导出资产、下载模板 | 允许 | 允许 | 允许 |
+| 新增、编辑、删除项目和资产 | 允许 | 允许 | 禁止 |
+| 导入资产 | 允许 | 允许 | 禁止 |
+| 查看、新增、编辑、删除用户 | 允许 | 禁止 | 禁止 |
 
 ## 10. 资产导入导出
 
@@ -395,15 +408,18 @@ Authorization: Bearer <token>
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/auth/login` | 用户登录，返回令牌和用户信息 |
+| `PUT` | `/api/account/password` | 当前登录用户修改自己的密码 |
 
 登录请求示例：
 
 ```json
 {
   "username": "admin",
-  "password": "admin123"
+  "password": "StrongPassword#2026"
 }
 ```
+
+密码至少 8 位，并且必须同时包含大写字母、小写字母、数字和特殊符号。管理员创建用户、编辑用户时重置密码，以及用户自助修改密码都使用同一规则。
 
 ### 11.2 总览
 
@@ -441,7 +457,7 @@ Authorization: Bearer <token>
 | `GET` | `/api/users` | 查询用户列表 |
 | `POST` | `/api/users` | 新建用户 |
 | `PUT` | `/api/users/{id}` | 编辑用户 |
-| `DELETE` | `/api/users/{id}` | 删除用户 |
+| `DELETE` | `/api/users/{id}` | 删除用户；用户名为 `admin` 的账号不允许删除 |
 
 ## 12. Docker 运行
 
@@ -458,6 +474,7 @@ DB_USERNAME=cmdb_app
 DB_PASSWORD=replace-with-your-password
 JWT_SECRET=replace-with-a-long-random-secret
 JWT_EXPIRE_HOURS=12
+ADMIN_PASSWORD=replace-with-a-strong-initial-admin-password
 ```
 
 然后执行：
@@ -499,6 +516,7 @@ docker run -d --name orbit-cmdb -p 8080:8080 \
   -e DB_USERNAME='cmdb_app' \
   -e DB_PASSWORD='replace-with-your-password' \
   -e JWT_SECRET='replace-with-a-long-random-secret' \
+  -e ADMIN_PASSWORD='replace-with-a-strong-initial-admin-password' \
   orbit-cmdb:1.0.0
 ```
 
@@ -523,6 +541,7 @@ docker run -d --name orbit-cmdb -p 8080:8080 \
 - `DB_USERNAME`
 - `DB_PASSWORD`
 - `JWT_SECRET`
+- `ADMIN_PASSWORD`
 
 将 Deployment 中的 `image` 改为镜像仓库地址，例如：
 
@@ -591,7 +610,8 @@ database/init.sql
 - 确认用户名大小写和密码输入无误。
 - 确认用户在 `sys_user` 中存在。
 - 确认 `enabled` 为 `1`。
-- 如果已经修改过管理员密码，初始密码 `admin123` 不再适用。
+- 如果已经修改过管理员密码，请使用修改后的密码登录。
+- 首次安装前请通过 `ADMIN_PASSWORD` 设置符合密码策略的管理员密码。
 
 ### 14.4 接口返回“登录已失效”
 
@@ -618,7 +638,7 @@ database/init.sql
 已完成以下验证：
 
 - Maven 打包成功。
-- Java 8 JAR 启动成功。
+- Java 17 JAR 启动成功。
 - 8080 端口正常监听。
 - 管理员登录成功。
 - 总览、资产清单、项目空间和用户权限页面可访问。

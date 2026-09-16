@@ -4,7 +4,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>2.7.18</version>
+        <version>3.3.13</version>
         <relativePath/>
     </parent>
     <groupId>com.cmdb</groupId>
@@ -12,7 +12,7 @@
     <version>1.0.0</version>
     <name>cmdb</name>
     <description>轻量级配置管理数据库</description>
-    <properties><java.version>1.8</java.version></properties>
+    <properties><java.version>17</java.version></properties>
     <dependencies>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>

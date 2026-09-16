@@ -16,6 +16,7 @@ services:
       DB_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD must be set in .env or the shell environment}"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env or the shell environment}"
       JWT_EXPIRE_HOURS: "${JWT_EXPIRE_HOURS:-12}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-ChangeMe#Admin2026}"
     read_only: true
     tmpfs:
       - /tmp

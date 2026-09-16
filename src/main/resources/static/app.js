@@ -38,7 +38,6 @@ const loginTemplate = `
         <button class="primary" type="submit" style="width:100%" :disabled="busy">
           {{ busy ? '登录中…' : '进入控制台' }}
         </button>
-        <p class="sub hint">初始账号：admin / admin123</p>
       </form>
     </section>
   </div>`;
@@ -62,6 +61,7 @@ const appTemplate = `
         <div class="user">
           <div class="avatar">{{ userInitial }}</div>
           <span>{{ user.displayName }}</span>
+          <button class="ghost" type="button" @click="open('password')">修改密码</button>
           <button class="ghost" type="button" @click="logout">退出</button>
         </div>
       </header>
@@ -88,7 +88,7 @@ const appTemplate = `
                 <tr v-for="asset in assets.slice(0, 8)" :key="asset.id">
                   <td><b>{{ asset.name }}</b></td><td>{{ asset.projectName }}</td>
                   <td>{{ asset.privateIp || '-' }}</td><td>{{ asset.publicIp || '-' }}</td>
-                  <td><span :class="['pill', asset.status === 'OFFLINE' ? 'off' : '']">{{ asset.status }}</span></td>
+                  <td><span :class="['pill', statusClass(asset.status)]">{{ statusLabel(asset.status) }}</span></td>
                 </tr>
                 <tr v-if="!assets.length"><td colspan="5" class="empty">还没有资产</td></tr>
               </tbody>
@@ -108,20 +108,20 @@ const appTemplate = `
             <button class="ghost" type="button" @click="downloadTemplate">下载 Excel 模板</button>
             <button class="ghost" type="button" @click="downloadCsv">导出 CSV</button>
             <button class="ghost" type="button" @click="downloadExcel">导出 Excel</button>
-            <label class="ghost file-btn">导入 CSV / Excel<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="importFile"></label>
-            <button class="primary" type="button" @click="open('asset')" :disabled="!projects.length">+ 新建资产</button>
+            <label v-if="canWrite" class="ghost file-btn">导入 CSV / Excel<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="importFile"></label>
+            <button v-if="canWrite" class="primary" type="button" @click="open('asset')" :disabled="!projects.length">+ 新建资产</button>
           </div>
         </div>
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>资产名称</th><th>资产类型</th><th>项目</th><th>环境</th><th>内网 IP</th><th>外网 IP</th><th>状态</th><th>操作</th></tr></thead>
+            <thead><tr><th>资产名称</th><th>资产类型</th><th>项目</th><th>环境</th><th>内网 IP</th><th>外网 IP</th><th>状态</th><th v-if="canWrite">操作</th></tr></thead>
             <tbody>
               <tr v-for="asset in filteredAssets" :key="asset.id">
                 <td><b>{{ asset.name }}</b><small class="sub-cell">{{ asset.hostname || '' }}</small></td>
-                <td>{{ asset.assetType || '-' }}</td><td>{{ asset.projectName }}</td><td>{{ asset.environment || '-' }}</td>
+                <td>{{ assetTypeLabel(asset.assetType) }}</td><td>{{ asset.projectName }}</td><td>{{ environmentLabel(asset.environment) }}</td>
                 <td>{{ asset.privateIp || '-' }}</td><td>{{ asset.publicIp || '-' }}</td>
-                <td><span :class="['pill', asset.status === 'OFFLINE' ? 'off' : '']">{{ asset.status }}</span></td>
-                <td class="actions"><button class="ghost" type="button" @click="open('asset', asset)">编辑</button><button class="ghost danger" type="button" @click="remove('assets', asset.id)">删除</button></td>
+                <td><span :class="['pill', statusClass(asset.status)]">{{ statusLabel(asset.status) }}</span></td>
+                <td v-if="canWrite" class="actions"><button class="ghost action-edit" type="button" @click="open('asset', asset)">编辑</button><button class="ghost danger action-delete" type="button" @click="remove('assets', asset.id, asset.name)">删除</button></td>
               </tr>
               <tr v-if="!filteredAssets.length"><td colspan="8" class="empty">没有匹配的资产</td></tr>
             </tbody>
@@ -130,15 +130,15 @@ const appTemplate = `
       </section>
 
       <section v-if="tab==='projects' && !loading" class="panel">
-        <div class="section-head"><h3>项目空间</h3><button class="primary" type="button" @click="open('project')">+ 新建项目</button></div>
+        <div class="section-head"><h3>项目空间</h3><button v-if="canWrite" class="primary" type="button" @click="open('project')">+ 新建项目</button></div>
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th>项目名称</th><th>编码</th><th>负责人</th><th>资产数</th><th>操作</th></tr></thead>
+            <thead><tr><th>项目名称</th><th>编码</th><th>负责人</th><th>资产数</th><th v-if="canWrite">操作</th></tr></thead>
             <tbody>
               <tr v-for="project in projects" :key="project.id">
                 <td><b>{{ project.name }}</b></td><td>{{ project.code || '-' }}</td><td>{{ project.owner || '-' }}</td>
                 <td>{{ project.assetCount }}</td>
-                <td class="actions"><button class="ghost" type="button" @click="open('project', project)">编辑</button><button class="ghost danger" type="button" @click="remove('projects', project.id)">删除</button></td>
+                <td v-if="canWrite" class="actions"><button class="ghost action-edit" type="button" @click="open('project', project)">编辑</button><button class="ghost danger action-delete" type="button" @click="remove('projects', project.id, project.name)">删除</button></td>
               </tr>
               <tr v-if="!projects.length"><td colspan="5" class="empty">还没有项目空间</td></tr>
             </tbody>
@@ -153,8 +153,8 @@ const appTemplate = `
             <thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>状态</th><th>操作</th></tr></thead>
             <tbody>
               <tr v-for="item in users" :key="item.id">
-                <td><b>{{ item.username }}</b></td><td>{{ item.displayName }}</td><td>{{ item.role }}</td><td>{{ item.enabled ? '启用' : '停用' }}</td>
-                <td class="actions"><button class="ghost" type="button" @click="open('user', item)">编辑</button><button class="ghost danger" type="button" @click="remove('users', item.id)">删除</button></td>
+                <td><b>{{ item.username }}</b></td><td>{{ item.displayName }}</td><td>{{ roleLabel(item.role) }}</td><td>{{ item.enabled ? '启用' : '停用' }}</td>
+                <td class="actions"><button class="ghost action-edit" type="button" @click="open('user', item)">编辑</button><button v-if="item.username.toLowerCase() !== 'admin'" class="ghost danger action-delete" type="button" @click="remove('users', item.id, item.displayName || item.username)">删除</button></td>
               </tr>
             </tbody>
           </table>
@@ -165,16 +165,22 @@ const appTemplate = `
     <div v-if="showModal" class="modal-back" @click.self="close">
       <form class="modal" @submit.prevent="save">
         <div class="section-head">
-          <h3>{{ editing ? '编辑' : '新建' }}{{ modalType==='asset' ? '资产' : modalType==='project' ? '项目' : '用户' }}</h3>
+          <h3>{{ modalType==='password' ? '修改密码' : (editing ? '编辑' : '新建') + (modalType==='asset' ? '资产' : modalType==='project' ? '项目' : '用户') }}</h3>
           <button class="ghost close" type="button" @click="close">×</button>
         </div>
         <div class="form-grid">
-          <template v-if="modalType==='asset'">
+          <template v-if="modalType==='password'">
+            <div class="field wide"><label>当前密码 *</label><input type="password" v-model="form.currentPassword" autocomplete="current-password" required></div>
+            <div class="field"><label>新密码 *</label><input type="password" v-model="form.newPassword" minlength="8" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}" autocomplete="new-password" required></div>
+            <div class="field"><label>确认新密码 *</label><input type="password" v-model="form.confirmPassword" minlength="8" autocomplete="new-password" required></div>
+            <p class="import-hint wide">密码至少 8 位，必须包含大写字母、小写字母、数字和特殊符号。</p>
+          </template>
+          <template v-else-if="modalType==='asset'">
             <div class="field"><label>资产名称 *</label><input v-model.trim="form.name" required></div>
-            <div class="field"><label>资产类型</label><select v-model="form.assetType"><option value="">请选择</option><option v-if="form.assetType && !assetTypes.includes(form.assetType)" :value="form.assetType">{{ form.assetType }}</option><option v-for="type in assetTypes" :value="type" :key="type">{{ type }}</option></select></div>
+            <div class="field"><label>资产类型</label><select v-model="form.assetType"><option value="">请选择</option><option v-if="form.assetType && !assetTypes.includes(form.assetType)" :value="form.assetType">{{ assetTypeLabel(form.assetType) }}</option><option v-for="type in assetTypes" :value="type" :key="type">{{ assetTypeLabel(type) }}</option></select></div>
             <div class="field"><label>项目 *</label><select v-model="form.projectId" required><option v-for="project in projects" :value="project.id" :key="project.id">{{ project.name }}</option></select></div>
-            <div class="field"><label>环境</label><select v-model="form.environment"><option>PRODUCTION</option><option>STAGING</option><option>DEVELOPMENT</option></select></div>
-            <div class="field"><label>状态</label><select v-model="form.status"><option>ONLINE</option><option>OFFLINE</option><option>MAINTENANCE</option></select></div>
+            <div class="field"><label>环境</label><select v-model="form.environment"><option value="PRODUCTION">生产环境</option><option value="STAGING">预发布环境</option><option value="DEVELOPMENT">开发环境</option></select></div>
+            <div class="field"><label>状态</label><select v-model="form.status"><option value="ONLINE">在线</option><option value="OFFLINE">离线</option><option value="MAINTENANCE">维护中</option></select></div>
             <div class="field"><label>区域</label><input v-model.trim="form.region" placeholder="杭州 / 华东"></div>
             <div class="field"><label>内网 IP</label><input v-model.trim="form.privateIp"></div>
             <div class="field"><label>外网 IP</label><input v-model.trim="form.publicIp"></div>
@@ -190,8 +196,8 @@ const appTemplate = `
           <template v-else>
             <div class="field"><label>用户名 *</label><input v-model.trim="form.username" :disabled="!!editing" required></div>
             <div class="field"><label>显示名称</label><input v-model.trim="form.displayName"></div>
-            <div class="field"><label>{{ editing ? '重置密码' : '密码' }}</label><input type="password" v-model="form.password" :required="!editing"></div>
-            <div class="field"><label>角色</label><select v-model="form.role"><option>OPERATOR</option><option>ADMIN</option><option>VIEWER</option></select></div>
+            <div class="field"><label>{{ editing ? '重置密码' : '密码' }}{{ editing ? '（填写时生效）' : ' *' }}</label><input type="password" v-model="form.password" minlength="8" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}" :required="!editing"></div>
+            <div class="field"><label>角色</label><select v-model="form.role"><option value="OPERATOR">运维人员</option><option value="ADMIN">管理员</option><option value="VIEWER">只读用户</option></select></div>
             <div v-if="editing" class="field"><label>状态</label><select v-model="form.enabled"><option :value="true">启用</option><option :value="false">停用</option></select></div>
           </template>
         </div>
@@ -206,7 +212,7 @@ createApp({
     return {
       token: localStorage.token || '',
       user: JSON.parse(localStorage.user || 'null'),
-      loginForm: { username: 'admin', password: 'admin123' },
+      loginForm: { username: '', password: '' },
       loginError: ''
     };
   },
@@ -248,13 +254,19 @@ createApp({
         user() { return this.$root.user || {}; },
         userInitial() { return (this.user.displayName || this.user.username || 'U').substring(0, 1); },
         canManageUsers() { return this.user.role === 'ADMIN'; },
+        canWrite() { return this.user.role === 'ADMIN' || this.user.role === 'OPERATOR'; },
         filteredAssets() {
           const query = this.keyword.toLowerCase();
-          return this.assets.filter(asset => !query || [asset.name, asset.privateIp, asset.publicIp, asset.hostname, asset.assetType].join(' ').toLowerCase().includes(query));
+          return this.assets.filter(asset => !query || [asset.name, asset.privateIp, asset.publicIp, asset.hostname, asset.assetType, this.assetTypeLabel(asset.assetType), this.environmentLabel(asset.environment), this.statusLabel(asset.status)].join(' ').toLowerCase().includes(query));
         }
       },
       mounted() { this.load(); },
       methods: {
+        assetTypeLabel(value) { return { SERVER: '服务器', DATABASE: '数据库', NETWORK: '网络设备', STORAGE: '存储设备', APPLICATION: '应用系统', OTHER: '其他' }[value] || value || '-'; },
+        environmentLabel(value) { return { PRODUCTION: '生产环境', STAGING: '预发布环境', DEVELOPMENT: '开发环境' }[value] || value || '-'; },
+        statusLabel(value) { return { ONLINE: '在线', OFFLINE: '离线', MAINTENANCE: '维护中' }[value] || value || '-'; },
+        roleLabel(value) { return { ADMIN: '管理员', OPERATOR: '运维人员', VIEWER: '只读用户' }[value] || value || '-'; },
+        statusClass(value) { return value === 'OFFLINE' ? 'off' : value === 'MAINTENANCE' ? 'maintenance' : ''; },
         async load() {
           this.loading = true;
           try {
@@ -283,7 +295,9 @@ createApp({
         open(type, item) {
           this.modalType = type;
           this.editing = item || null;
-          if (type === 'asset') {
+          if (type === 'password') {
+            this.form = { currentPassword: '', newPassword: '', confirmPassword: '' };
+          } else if (type === 'asset') {
             this.form = item ? { ...item } : { status: 'ONLINE', environment: 'PRODUCTION', projectId: this.projects[0] && this.projects[0].id };
           } else if (type === 'project') {
             this.form = item ? { name: item.name, code: item.code, owner: item.owner, description: item.description } : {};
@@ -296,6 +310,12 @@ createApp({
         async save() {
           this.saving = true;
           try {
+            if (this.modalType === 'password') {
+              await api('/account/password', { method: 'PUT', body: JSON.stringify(this.form) });
+              this.close();
+              this.notify('密码修改成功，请使用新密码登录');
+              return;
+            }
             const path = this.modalType === 'asset' ? '/assets' : this.modalType === 'project' ? '/projects' : '/users';
             const url = this.editing ? path + '/' + this.editing.id : path;
             await api(url, { method: this.editing ? 'PUT' : 'POST', body: JSON.stringify(this.form) });
@@ -308,8 +328,8 @@ createApp({
             this.saving = false;
           }
         },
-        async remove(type, id) {
-          if (!confirm('确认删除这条记录？')) return;
+        async remove(type, id, label) {
+          if (!confirm(`确认删除“${label || '这条记录'}”吗？删除后数据不可恢复，请再次确认。`)) return;
           try {
             await api('/' + type + '/' + id, { method: 'DELETE' });
             this.notify('删除成功');

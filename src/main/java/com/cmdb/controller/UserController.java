@@ -11,6 +11,7 @@ import java.util.*;
 @RequestMapping("/api/users")
 public class UserController {
     private static final Set<String> ROLES = new HashSet<>(Arrays.asList("ADMIN", "OPERATOR", "VIEWER"));
+    private static final String PASSWORD_PATTERN = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{8,}$";
 
     private final UserRepository users;
     private final BCryptPasswordEncoder encoder;
@@ -37,7 +38,7 @@ public class UserController {
 
         User user = new User();
         user.setUsername(username);
-        user.setPassword(encoder.encode(defaultText(body.get("password"), "123456")));
+        user.setPassword(encoder.encode(requirePassword(body.get("password"))));
         user.setDisplayName(defaultText(body.get("displayName"), username));
         user.setRole(normalizeRole(body.get("role")));
         user.setEnabled(true);
@@ -51,7 +52,7 @@ public class UserController {
         if (body.containsKey("role")) user.setRole(normalizeRole(body.get("role")));
         if (body.containsKey("enabled")) user.setEnabled(Boolean.valueOf(body.get("enabled")));
         if (body.containsKey("password") && body.get("password") != null && !body.get("password").trim().isEmpty()) {
-            user.setPassword(encoder.encode(body.get("password").trim()));
+            user.setPassword(encoder.encode(requirePassword(body.get("password"))));
         }
         return safe(users.save(user));
     }
@@ -59,7 +60,15 @@ public class UserController {
     @DeleteMapping("/{id}")
     public void delete(@PathVariable Long id) {
         User user = users.findById(id).orElseThrow(() -> new RuntimeException("用户不存在"));
+        if ("admin".equalsIgnoreCase(user.getUsername())) throw new RuntimeException("admin 账号不允许删除");
         users.delete(user);
+    }
+
+    private String requirePassword(String password) {
+        if (password == null || !password.matches(PASSWORD_PATTERN)) {
+            throw new RuntimeException("密码至少 8 位，且必须包含大写字母、小写字母、数字和特殊符号");
+        }
+        return password;
     }
 
     private String normalizeRole(String role) {
