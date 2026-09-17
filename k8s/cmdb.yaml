@@ -34,7 +34,9 @@ spec:
       labels:
         app.kubernetes.io/name: cmdb
       annotations:
-        prometheus.io/scrape: "true"
+        # Metrics endpoints require an ADMIN bearer token. Keep scrape disabled
+        # unless your Prometheus setup can attach the required Authorization header.
+        prometheus.io/scrape: "false"
         prometheus.io/path: /actuator/prometheus
         prometheus.io/port: "8080"
     spec:

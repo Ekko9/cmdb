@@ -26,9 +26,13 @@ public class ProjectController {
     @GetMapping
     @Transactional(readOnly = true)
     public List<Map<String, Object>> list() {
+        Map<Long, Long> assetCounts = new HashMap<>();
+        for (Object[] row : projects.countAssetsGroupedByProject()) {
+            assetCounts.put((Long) row[0], ((Number) row[1]).longValue());
+        }
         List<Map<String, Object>> result = new ArrayList<>();
         for (Project project : projects.findAll()) {
-            result.add(view(project));
+            result.add(view(project, assetCounts.getOrDefault(project.getId(), 0L)));
         }
         return result;
     }
@@ -41,7 +45,7 @@ public class ProjectController {
         }
         Project saved = projects.save(form);
         auditService.operation(request, "CREATE", "PROJECT", saved.getId(), saved.getName(), "SUCCESS", "新增项目");
-        return view(saved);
+        return view(saved, assets.countByProjectId(saved.getId()));
     }
 
     @PutMapping("/{id}")
@@ -60,7 +64,7 @@ public class ProjectController {
         project.setDescription(form.getDescription());
         Project saved = projects.save(project);
         auditService.operation(request, "UPDATE", "PROJECT", saved.getId(), saved.getName(), "SUCCESS", "编辑项目");
-        return view(saved);
+        return view(saved, assets.countByProjectId(saved.getId()));
     }
 
     @DeleteMapping("/{id}")
@@ -90,14 +94,14 @@ public class ProjectController {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private Map<String, Object> view(Project project) {
+    private Map<String, Object> view(Project project, long assetCount) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("id", project.getId());
         result.put("name", project.getName());
         result.put("code", project.getCode());
         result.put("owner", project.getOwner());
         result.put("description", project.getDescription());
-        result.put("assetCount", assets.countByProjectId(project.getId()));
+        result.put("assetCount", assetCount);
         result.put("createdAt", project.getCreatedAt());
         return result;
     }

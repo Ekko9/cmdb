@@ -166,18 +166,24 @@ public class AssetController {
             throw new RuntimeException("请选择 CSV 或 Excel 文件");
         }
         String filename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename().toLowerCase(Locale.ROOT);
+        if (!filename.endsWith(".xlsx") && !filename.endsWith(".csv")) {
+            throw new RuntimeException("仅支持 .csv 或 .xlsx 文件");
+        }
         ImportAudit audit = new ImportAudit();
         audit.setFilename(file.getOriginalFilename() == null ? "unknown" : file.getOriginalFilename());
-        audit.setFileType(filename.endsWith(".xlsx") ? "XLSX" : filename.endsWith(".csv") ? "CSV" : "UNKNOWN");
+        audit.setFileType(filename.endsWith(".xlsx") ? "XLSX" : "CSV");
         audit.setOperator(auditService.operator(request));
         audit = importAudits.save(audit);
         Map<String, Object> result;
         if (filename.endsWith(".xlsx")) result = importExcel(request, file, audit);
-        else {
-            if (!filename.endsWith(".csv")) throw new RuntimeException("仅支持 .csv 或 .xlsx 文件");
-            result = importCsvFile(request, file, audit);
+        else result = importCsvFile(request, file, audit);
+        String operationResult = "SUCCESS";
+        if (((Number) result.get("count")).intValue() == 0 && ((Number) result.get("skipped")).intValue() > 0) {
+            operationResult = "FAILED";
+        } else if (((Number) result.get("skipped")).intValue() > 0) {
+            operationResult = "PARTIAL";
         }
-        auditService.operation(request, "IMPORT", "ASSET", audit.getId(), audit.getFilename(), "SUCCESS",
+        auditService.operation(request, "IMPORT", "ASSET", audit.getId(), audit.getFilename(), operationResult,
                 "导入成功 " + result.get("count") + " 条，失败 " + result.get("skipped") + " 条");
         return result;
     }
@@ -219,6 +225,9 @@ public class AssetController {
         int skipped = 0;
         int totalRows = 0;
         List<String> errors = new ArrayList<>();
+        Set<String> seenNames = new HashSet<>();
+        Set<String> seenPrivateIps = new HashSet<>();
+        Set<String> seenPublicIps = new HashSet<>();
         CSVFormat format = CSVFormat.DEFAULT.builder().setSkipHeaderRecord(true).setHeader()
                 .setTrim(true).build();
         try (Reader reader = new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8);
@@ -243,7 +252,7 @@ public class AssetController {
                     body.put("status", record.size() > 7 ? record.get(7) : "ONLINE");
                     body.put("region", record.size() > 8 ? record.get(8) : null);
                     body.put("description", record.size() > 9 ? record.get(9) : null);
-                    Asset asset = assets.save(from(body, new Asset()));
+                    Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps);
                     auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
                 } catch (RuntimeException ex) {
@@ -361,17 +370,21 @@ public class AssetController {
     }
 
     private Asset from(Map<String, Object> body, Asset asset) {
+        if (body == null) throw new RuntimeException("请求数据不能为空");
         String name = text(body, "name");
         if (name == null) throw new RuntimeException("资产名称不能为空");
+        if (name.length() > 100) throw new RuntimeException("资产名称不能超过 100 个字符");
         asset.setName(name);
-        asset.setAssetType(text(body, "assetType"));
-        asset.setEnvironment(text(body, "environment"));
-        asset.setPrivateIp(text(body, "privateIp"));
-        asset.setPublicIp(text(body, "publicIp"));
-        asset.setHostname(text(body, "hostname"));
-        asset.setStatus(textOr(body, "status", "ONLINE"));
-        asset.setRegion(text(body, "region"));
-        asset.setDescription(text(body, "description"));
+        String type = text(body, "assetType");
+        if (type != null && !assetTypeCodes().contains(type.toUpperCase(Locale.ROOT))) throw new RuntimeException("资产类型无效：" + type);
+        asset.setAssetType(type == null ? null : type.toUpperCase(Locale.ROOT));
+        asset.setEnvironment(enumValue(body, "environment", Set.of("PRODUCTION", "STAGING", "DEVELOPMENT"), "PRODUCTION"));
+        asset.setPrivateIp(ipValue(body, "privateIp"));
+        asset.setPublicIp(ipValue(body, "publicIp"));
+        asset.setHostname(limitText(text(body, "hostname"), 100, "主机名"));
+        asset.setStatus(enumValue(body, "status", Set.of("ONLINE", "OFFLINE", "MAINTENANCE"), "ONLINE"));
+        asset.setRegion(limitText(text(body, "region"), 100, "区域"));
+        asset.setDescription(limitText(text(body, "description"), 500, "描述"));
         String projectName = text(body, "projectName");
         Object projectId = body.get("projectId");
         if (projectName != null) {
@@ -392,11 +405,36 @@ public class AssetController {
         return asset;
     }
 
+    private String enumValue(Map<String, Object> body, String key, Set<String> allowed, String fallback) {
+        String value = text(body, key);
+        if (value == null) return fallback;
+        value = value.toUpperCase(Locale.ROOT);
+        if (!allowed.contains(value)) throw new RuntimeException(key + " 值无效：" + value);
+        return value;
+    }
+
+    private String ipValue(Map<String, Object> body, String key) {
+        String value = text(body, key);
+        if (value == null) return null;
+        if (value.length() > 45 || !value.matches("^[0-9A-Fa-f:.]+$") || !value.contains("." ) && !value.contains(":")) {
+            throw new RuntimeException(key + " 不是有效的 IP 地址");
+        }
+        return value;
+    }
+
+    private String limitText(String value, int max, String label) {
+        if (value != null && value.length() > max) throw new RuntimeException(label + "不能超过 " + max + " 个字符");
+        return value;
+    }
+
     private Map<String, Object> importExcel(HttpServletRequest request, MultipartFile file, ImportAudit audit) throws IOException {
         int imported = 0;
         int skipped = 0;
         int totalRows = 0;
         List<String> errors = new ArrayList<>();
+        Set<String> seenNames = new HashSet<>();
+        Set<String> seenPrivateIps = new HashSet<>();
+        Set<String> seenPublicIps = new HashSet<>();
         try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
             Sheet sheet = workbook.getSheetAt(0);
             DataFormatter formatter = new DataFormatter();
@@ -416,7 +454,7 @@ public class AssetController {
                     body.put("status", cell(row, 7, formatter));
                     body.put("region", cell(row, 8, formatter));
                     body.put("description", cell(row, 9, formatter));
-                    Asset asset = assets.save(from(body, new Asset()));
+                    Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps);
                     auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
                 } catch (RuntimeException ex) {
@@ -427,6 +465,47 @@ public class AssetController {
         }
         finishImport(audit, totalRows, imported, skipped);
         return importResult(audit.getId(), imported, skipped, errors);
+    }
+
+    private Asset saveImportedAsset(HttpServletRequest request, Map<String, Object> body,
+                                    Set<String> seenNames, Set<String> seenPrivateIps,
+                                    Set<String> seenPublicIps) {
+        Asset asset = from(body, new Asset());
+        String nameKey = asset.getProject().getId() + "|" + normalizeKey(asset.getName());
+        String privateIpKey = normalizeKey(asset.getPrivateIp());
+        String publicIpKey = normalizeKey(asset.getPublicIp());
+
+        if (!seenNames.add(nameKey)) {
+            throw new RuntimeException("文件内存在重复资产：同一项目下资产名称“" + asset.getName() + "”重复");
+        }
+        if (privateIpKey != null && !seenPrivateIps.add(privateIpKey)) {
+            throw new RuntimeException("文件内存在重复内网 IP：" + asset.getPrivateIp());
+        }
+        if (publicIpKey != null && !seenPublicIps.add(publicIpKey)) {
+            throw new RuntimeException("文件内存在重复外网 IP：" + asset.getPublicIp());
+        }
+        if (assets.existsByNameIgnoreCaseAndProjectId(asset.getName(), asset.getProject().getId())) {
+            throw new RuntimeException("数据库中已存在同一项目资产：" + asset.getName());
+        }
+        if (privateIpKey != null && assets.existsByPrivateIpIgnoreCase(asset.getPrivateIp())) {
+            throw new RuntimeException("数据库中已存在内网 IP：" + asset.getPrivateIp());
+        }
+        if (publicIpKey != null && assets.existsByPublicIpIgnoreCase(asset.getPublicIp())) {
+            throw new RuntimeException("数据库中已存在外网 IP：" + asset.getPublicIp());
+        }
+        try {
+            return assets.save(asset);
+        } catch (RuntimeException exception) {
+            seenNames.remove(nameKey);
+            if (privateIpKey != null) seenPrivateIps.remove(privateIpKey);
+            if (publicIpKey != null) seenPublicIps.remove(publicIpKey);
+            throw exception;
+        }
+    }
+
+    private String normalizeKey(String value) {
+        if (value == null || value.trim().isEmpty()) return null;
+        return value.trim().toLowerCase(Locale.ROOT);
     }
 
     private Map<String, Object> importResult(Long importId, int imported, int skipped, List<String> errors) {
@@ -521,7 +600,7 @@ public class AssetController {
         CellRangeAddressList range = new CellRangeAddressList(firstRow, lastRow, column, column);
         DataValidation validation = helper.createValidation(constraint, range);
         // OOXML 的 showDropDown 语义是反向的：false 才表示显示下拉箭头。
-        validation.setSuppressDropDownArrow(true);
+        validation.setSuppressDropDownArrow(false);
         validation.setShowErrorBox(true);
         sheet.addValidationData(validation);
     }

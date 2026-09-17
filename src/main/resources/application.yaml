@@ -33,7 +33,7 @@ management:
 cmdb:
   jwt-secret: "${JWT_SECRET:change-me-before-startup}"
   jwt-expire-hours: ${JWT_EXPIRE_HOURS:12}
-  initial-admin-password: "${ADMIN_PASSWORD:ChangeMe#Admin2026}"
+  initial-admin-password: "${ADMIN_PASSWORD:}"
 logging:
   file:
     name: ${LOG_FILE:logs/cmdb.log}

@@ -16,7 +16,7 @@ services:
       DB_PASSWORD: "${DB_PASSWORD:?DB_PASSWORD must be set in .env or the shell environment}"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env or the shell environment}"
       JWT_EXPIRE_HOURS: "${JWT_EXPIRE_HOURS:-12}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-ChangeMe#Admin2026}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env or the shell environment}"
       LOG_FILE: /tmp/logs/cmdb.log
       LOG_MAX_FILE_SIZE: "${LOG_MAX_FILE_SIZE:-20MB}"
       LOG_MAX_HISTORY: "${LOG_MAX_HISTORY:-14}"

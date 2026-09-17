@@ -22,4 +22,8 @@ public interface AssetRepository extends JpaRepository<Asset, Long>, JpaSpecific
 
     long countByStatus(String status);
     long countByEnvironment(String environment);
+
+    boolean existsByNameIgnoreCaseAndProjectId(String name, Long projectId);
+    boolean existsByPrivateIpIgnoreCase(String privateIp);
+    boolean existsByPublicIpIgnoreCase(String publicIp);
 }
