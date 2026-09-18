@@ -361,8 +361,7 @@ public class AssetController {
             sizeColumns(sheet, headers.length);
             sizeColumns(options, optionHeaders.length);
             options.createFreezePane(0, 1);
-            // 普通隐藏比 VERY_HIDDEN 对 Excel/WPS 的数据验证兼容性更好。
-            workbook.setSheetVisibility(workbook.getSheetIndex(options), SheetVisibility.HIDDEN);
+            // Keep the source values visible so Excel/WPS can resolve the validation lists reliably.
             workbook.write(output);
             return fileResponse(output.toByteArray(), "cmdb-asset-import-template.xlsx",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -599,8 +598,9 @@ public class AssetController {
         DataValidationConstraint constraint = helper.createFormulaListConstraint(formula);
         CellRangeAddressList range = new CellRangeAddressList(firstRow, lastRow, column, column);
         DataValidation validation = helper.createValidation(constraint, range);
-        // OOXML 的 showDropDown 语义是反向的：false 才表示显示下拉箭头。
-        validation.setSuppressDropDownArrow(false);
+        // POI writes the OOXML showDropDown flag with the opposite meaning.
+        // Passing true here produces showDropDown="false", which displays the arrow in Excel/WPS.
+        validation.setSuppressDropDownArrow(true);
         validation.setShowErrorBox(true);
         sheet.addValidationData(validation);
     }
@@ -612,7 +612,12 @@ public class AssetController {
     }
 
     private void sizeColumns(Sheet sheet, int count) {
-        for (int i = 0; i < count; i++) sheet.autoSizeColumn(i);
+        // Fixed widths keep workbook generation independent of AWT/font packages on headless servers.
+        int[] widths = {24, 16, 16, 20, 20, 22, 24, 16, 30, 42};
+        for (int i = 0; i < count; i++) {
+            int width = i < widths.length ? widths[i] : 20;
+            sheet.setColumnWidth(i, Math.min(width * 256, 255 * 256));
+        }
     }
 
     private ResponseEntity<byte[]> fileResponse(byte[] bytes, String filename, String contentType) {
