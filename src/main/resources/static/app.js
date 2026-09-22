@@ -152,7 +152,7 @@ const appTemplate = `
           <span>第 {{ importPage.page + 1 }} / {{ Math.max(importPage.totalPages, 1) }} 页，共 {{ importPage.totalElements }} 条</span>
           <button class="ghost" type="button" @click="nextImportPage" :disabled="importPage.page + 1 >= importPage.totalPages">下一页</button>
           <select v-model.number="importPage.size" @change="changeImportPageSize">
-            <option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option>
+            <option :value="5">5 条</option><option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option>
           </select>
         </div>
       </section>
@@ -171,7 +171,7 @@ const appTemplate = `
           <span>第 {{ auditPage.page + 1 }} / {{ Math.max(auditPage.totalPages, 1) }} 页，共 {{ auditPage.totalElements }} 条</span>
           <button class="ghost" type="button" @click="nextAuditPage" :disabled="auditPage.page + 1 >= auditPage.totalPages">下一页</button>
           <select v-model.number="auditPage.size" @change="changeAuditPageSize">
-            <option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option>
+            <option :value="5">5 条</option><option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option>
           </select>
         </div>
       </section>
@@ -324,7 +324,7 @@ createApp({
           assetPage: { page: 0, size: 10, totalElements: 0, totalPages: 0, sort: 'updatedAt', direction: 'desc' },
           imports: [], audits: [], detailAsset: null,
           importPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
-          auditPage: { page: 0, size: 20, totalElements: 0, totalPages: 0 },
+          auditPage: { page: 0, size: 5, totalElements: 0, totalPages: 0 },
           regionDraft: { continent: '', country: '' },
           showModal: false, modalType: '', editing: null, form: {}, loading: false, saving: false,
           notice: '', noticeType: 'success', importing: false
