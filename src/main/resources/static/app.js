@@ -147,6 +147,14 @@ const appTemplate = `
             <tr v-if="!imports.length"><td colspan="9" class="empty">暂无导入记录</td></tr>
           </tbody>
         </table></div>
+        <div class="pager">
+          <button class="ghost" type="button" @click="prevImportPage" :disabled="importPage.page<=0">上一页</button>
+          <span>第 {{ importPage.page + 1 }} / {{ Math.max(importPage.totalPages, 1) }} 页，共 {{ importPage.totalElements }} 条</span>
+          <button class="ghost" type="button" @click="nextImportPage" :disabled="importPage.page + 1 >= importPage.totalPages">下一页</button>
+          <select v-model.number="importPage.size" @change="changeImportPageSize">
+            <option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option>
+          </select>
+        </div>
       </section>
 
       <section v-if="tab==='audits' && canManageUsers && !loading" class="panel">
@@ -158,6 +166,14 @@ const appTemplate = `
             <tr v-if="!audits.length"><td colspan="8" class="empty">暂无审计日志</td></tr>
           </tbody>
         </table></div>
+        <div class="pager">
+          <button class="ghost" type="button" @click="prevAuditPage" :disabled="auditPage.page<=0">上一页</button>
+          <span>第 {{ auditPage.page + 1 }} / {{ Math.max(auditPage.totalPages, 1) }} 页，共 {{ auditPage.totalElements }} 条</span>
+          <button class="ghost" type="button" @click="nextAuditPage" :disabled="auditPage.page + 1 >= auditPage.totalPages">下一页</button>
+          <select v-model.number="auditPage.size" @change="changeAuditPageSize">
+            <option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option>
+          </select>
+        </div>
       </section>
 
       <section v-if="tab==='projects' && !loading" class="panel">
@@ -307,6 +323,8 @@ createApp({
           filters: { keyword: '', projectId: '' },
           assetPage: { page: 0, size: 10, totalElements: 0, totalPages: 0, sort: 'updatedAt', direction: 'desc' },
           imports: [], audits: [], detailAsset: null,
+          importPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
+          auditPage: { page: 0, size: 20, totalElements: 0, totalPages: 0 },
           regionDraft: { continent: '', country: '' },
           showModal: false, modalType: '', editing: null, form: {}, loading: false, saving: false,
           notice: '', noticeType: 'success', importing: false
@@ -377,12 +395,28 @@ createApp({
           this.assetPage = { ...this.assetPage, page: data.page || 0, size: data.size || this.assetPage.size, totalElements: data.totalElements || 0, totalPages: data.totalPages || 0 };
         },
         async loadImports() {
-          const data = await api('/assets/imports');
+          const params = new URLSearchParams({ page: this.importPage.page, size: this.importPage.size });
+          const data = await api('/assets/imports?' + params.toString());
           this.imports = data.content || [];
+          this.importPage = {
+            ...this.importPage,
+            page: data.page || 0,
+            size: data.size || this.importPage.size,
+            totalElements: data.totalElements || 0,
+            totalPages: data.totalPages || 0
+          };
         },
         async loadAudits() {
-          const data = await api('/audits');
+          const params = new URLSearchParams({ page: this.auditPage.page, size: this.auditPage.size });
+          const data = await api('/audits?' + params.toString());
           this.audits = data.content || [];
+          this.auditPage = {
+            ...this.auditPage,
+            page: data.page || 0,
+            size: data.size || this.auditPage.size,
+            totalElements: data.totalElements || 0,
+            totalPages: data.totalPages || 0
+          };
         },
         async openDetail(id) {
           this.detailAsset = await api('/assets/' + id);
@@ -398,6 +432,12 @@ createApp({
         },
         async prevAssetPage() { if (this.assetPage.page > 0) { this.assetPage.page--; await this.loadAssets(); } },
         async nextAssetPage() { if (this.assetPage.page + 1 < this.assetPage.totalPages) { this.assetPage.page++; await this.loadAssets(); } },
+        async prevImportPage() { if (this.importPage.page > 0) { this.importPage.page--; await this.loadImports(); } },
+        async nextImportPage() { if (this.importPage.page + 1 < this.importPage.totalPages) { this.importPage.page++; await this.loadImports(); } },
+        async prevAuditPage() { if (this.auditPage.page > 0) { this.auditPage.page--; await this.loadAudits(); } },
+        async nextAuditPage() { if (this.auditPage.page + 1 < this.auditPage.totalPages) { this.auditPage.page++; await this.loadAudits(); } },
+        async changeImportPageSize() { this.importPage.page = 0; await this.loadImports(); },
+        async changeAuditPageSize() { this.auditPage.page = 0; await this.loadAudits(); },
         logout() {
           localStorage.clear();
           this.$root.token = '';
