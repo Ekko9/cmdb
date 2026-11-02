@@ -208,13 +208,14 @@ src/main/resources/application.yaml
 | `spring.jpa.hibernate.ddl-auto` | JPA 表结构策略 | 当前为 `validate` |
 | `spring.servlet.multipart.max-file-size` | 单个上传文件大小 | `10MB` |
 | `spring.servlet.multipart.max-request-size` | 请求最大大小 | `10MB` |
-| `cmdb.jwt-secret` | 令牌签名密钥 | 生产必须更换为长随机值 |
+| `cmdb.jwt-secret` | 令牌签名密钥 | 启动校验要求至少 32 个字符的随机值 |
 | `cmdb.jwt-expire-hours` | 令牌有效时长 | 默认 `12` 小时 |
 | `cmdb.initial-admin-password` | 首次创建管理员时使用的密码 | 通过 `ADMIN_PASSWORD` 提供 |
 | `management.endpoints.web.exposure.include` | 暴露健康和监控接口 | `health,info,metrics,prometheus` |
 | `logging.file.name` | 应用日志文件 | 默认 `logs/cmdb.log` |
 | `logging.logback.rollingpolicy.max-file-size` | 单个日志文件大小 | 默认 `20MB` |
 | `logging.logback.rollingpolicy.max-history` | 日志保留文件数 | 默认 `14` |
+| `logging.logback.rollingpolicy.total-size-cap` | 滚动日志总容量 | 默认 `512MB` |
 
 仓库中的 `application.yaml` 只保留安全占位值。启动时请通过环境变量、密钥管理服务或部署平台的加密配置提供真实数据库连接信息和令牌密钥，避免把真实密码提交到代码仓库。
 
@@ -228,12 +229,13 @@ Spring Boot 会自动读取环境变量。推荐在裸机、Docker 和 Kubernete
 | `DB_URL` | `spring.datasource.url` | `jdbc:mysql://mysql-host:3306/cmdb?...` |
 | `DB_USERNAME` | `spring.datasource.username` | `cmdb_app` |
 | `DB_PASSWORD` | `spring.datasource.password` | 数据库密码 |
-| `JWT_SECRET` | `cmdb.jwt-secret` | 长随机字符串 |
+| `JWT_SECRET` | `cmdb.jwt-secret` | 至少 32 个字符的随机字符串 |
 | `JWT_EXPIRE_HOURS` | `cmdb.jwt-expire-hours` | `12` |
 | `ADMIN_PASSWORD` | `cmdb.initial-admin-password` | 首次安装管理员密码 |
 | `LOG_FILE` | `logging.file.name` | `logs/cmdb.log` |
 | `LOG_MAX_FILE_SIZE` | `logging.logback.rollingpolicy.max-file-size` | `20MB` |
 | `LOG_MAX_HISTORY` | `logging.logback.rollingpolicy.max-history` | `14` |
+| `LOG_TOTAL_SIZE_CAP` | `logging.logback.rollingpolicy.total-size-cap` | `512MB` |
 
 Windows PowerShell 示例：
 
@@ -419,7 +421,7 @@ kill <pid>
 
 ```powershell
 $env:JAVA_HOME = 'D:\jude\jdk17'
-& 'D:\jude\maven\bin\mvn.cmd' clean package -DskipTests
+& 'D:\jude\maven\bin\mvn.cmd' clean package
 ```
 
 打包成功后会生成：
@@ -428,9 +430,17 @@ $env:JAVA_HOME = 'D:\jude\jdk17'
 target/cmdb-1.0.0.jar
 ```
 
-项目当前还没有完整的自动化测试用例，`-DskipTests` 只表示跳过测试执行，不代表代码不需要回归验证。
+构建会编译并执行自动化测试。Dockerfile 的正式打包阶段同样不会跳过测试。
 
-### 7.7 检查服务是否启动
+### 7.7 2026-11-02 已验证的 Linux 部署
+
+`192.168.11.218` 的裸机实例部署目录为 `/opt/fusx/cmdb`，服务端口为 `9090`。服务器系统默认 Java 仍为 Java 8，启动脚本使用项目目录中的 JDK 17，不要改用系统 Java。
+
+目录内运行配置保存在受限权限的 `cmdb.env`，不要覆盖或提交该文件。仓库中的 `deploy/cmdb-start.sh`、`deploy/cmdb-stop.sh` 和 `deploy/cmdb-status.sh` 用于启停检查。替换 JAR 时先备份旧包，健康检查通过后再清理备份。
+
+2026-11-02 的早期发布包 SHA-256 为 `69EB05B154B5CC31F398DEF8664211ECA51301CB7D47AB9B62B642B45C59827E`；后续退出清理修正版 SHA-256 为 `6736BBB922DAB7DAB5960A6A18BB5E7D03E0A2C64EAE8A3577056BD44892E498`。以本节“当前验证状态”记录的最新发布为准。
+
+### 7.8 检查服务是否启动
 
 检查 8080 端口：
 
@@ -457,7 +467,8 @@ Invoke-RestMethod -Uri 'http://localhost:8080/actuator/health/readiness'
 首次启动时，`DataInitializer` 会自动创建以下数据：
 
 - 管理员账号：`admin`
-- 首次启动前必须通过 `ADMIN_PASSWORD` 设置管理员密码；未设置或不符合密码策略时，应用会停止启动，避免创建默认弱密码账号。
+- 仅当数据库中还没有 `admin` 账号时，才会创建初始管理员；首次启动前必须通过 `ADMIN_PASSWORD` 设置密码。未设置或不符合密码策略时，应用会停止启动，不会创建默认弱密码账号。
+- 项目不提供通用默认密码。`ADMIN_PASSWORD` 只用于首次创建管理员；管理员已存在时，重新部署或重启不会修改其密码。遗忘密码需由另一位管理员在用户权限页面重置。
 - 默认角色：`ADMIN`
 - 默认项目：`默认项目`
 - 默认项目编码：`DEFAULT`
@@ -482,6 +493,8 @@ Invoke-RestMethod -Uri 'http://localhost:8080/actuator/health/readiness'
 6. 只有项目资产数为 `0` 时才允许删除项目。
 
 项目编码用于区分项目，重复编码会被拒绝。
+
+项目编码由数据库唯一索引保证唯一；升级已有数据库时，`init.sql` 会补建该索引。若已有重复编码，需先整理重复项目后再执行升级脚本。
 
 ### 9.3 资产清单
 
@@ -511,9 +524,14 @@ Invoke-RestMethod -Uri 'http://localhost:8080/actuator/health/readiness'
 2. 用户名不能重复。
 3. 可以设置显示名称和角色。
 4. 编辑用户时可以修改显示名称、角色、启用状态和密码。
-5. 停用用户无法继续登录。
-6. `admin` 是系统保留账号，不允许删除。
-7. 每个已登录用户都可以通过“修改密码”更新自己的密码；非管理员不能访问用户权限管理接口。
+5. 系统至少保留一位启用的管理员；不能停用、降权或删除最后一位启用管理员。
+6. 登录页支持提交注册申请；注册账号固定为停用的 `VIEWER` 只读账号，必须由管理员审核启用。
+7. 停用用户无法继续登录。
+8. `admin` 是系统保留账号，不允许删除。
+9. 密码有效期最长 3 个月，登录时提前 14 天提醒；到期后只能进入修改密码流程，修改成功后才能继续使用。
+10. 每个已登录用户都可以通过“修改密码”更新自己的密码；忘记密码只能联系管理员重置，非管理员不能访问用户权限管理接口。
+
+公开注册仅创建停用的只读账号，不开放自选角色，也不会自动登录。管理员在“用户权限”页面审核账号，必要时重置初始密码并启用。密码有效期按日历月计算；升级已有数据库时，初始化 SQL 会新增 `sys_user.password_changed_at`，将现有账号的有效期起点设为迁移时间，不会修改密码哈希。之后重复执行该 SQL 不会重置已经记录的密码时间。
 
 当前页面只向前端返回用户基本信息，不返回密码哈希。
 
@@ -588,6 +606,9 @@ web-01,SERVER,PRODUCTION,10.0.0.10,203.0.113.10,web-01,默认项目,ONLINE,亚�
 - 每次导入都会写入导入审计记录。
 - 导入失败行会保存行号、失败原因和原始数据，可在“导入审计”页面下载 CSV。
 - 导入不会自动更新已有资产；同一项目下资产名称重复、内网 IP 重复、外网 IP 重复，以及同一文件内的重复行都会被拒绝，并记录到失败行明细。
+- CSV 和 XLSX 单次最多导入 10,000 行；超过限制时整个请求会回滚。上传文件大小限制仍为 10MB。
+- 导出最多返回 10,000 条资产；需要更多数据时请先筛选或分批导出。
+- CSV 导出和失败行 CSV 会对公式起始字符进行转义，避免表格软件打开时将单元格内容当作公式执行。
 
 ### 10.4 页面操作
 
@@ -614,7 +635,10 @@ Authorization: Bearer <token>
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/auth/login` | 用户登录，返回令牌和用户信息 |
+| `POST` | `/api/auth/register` | 提交注册申请，新账号默认停用的只读账号 |
 | `PUT` | `/api/account/password` | 当前登录用户修改自己的密码 |
+
+登录响应中的 `user.passwordChangeRecommended` 和 `user.passwordDaysRemaining` 用于临期提醒。密码到期后，受保护 API 返回 HTTP `428`（`PASSWORD_EXPIRED`），仅允许调用修改密码接口；`/api/auth/register` 不需要登录，但新账号始终停用并为 `VIEWER`。
 
 登录请求示例：
 
@@ -625,7 +649,7 @@ Authorization: Bearer <token>
 }
 ```
 
-密码至少 8 位，并且必须同时包含大写字母、小写字母、数字和特殊符号。管理员创建用户、编辑用户时重置密码，以及用户自助修改密码都使用同一规则。
+密码至少 8 位，并且必须同时包含大写字母、小写字母、数字和特殊符号。管理员创建用户、编辑用户时重置密码，以及用户自助修改密码都使用同一规则。密码修改后最长有效 3 个月，距到期 14 天内登录会提示；过期后必须先修改密码。忘记密码不提供自助找回，只能联系管理员重置。
 
 ### 11.2 总览
 
@@ -783,9 +807,13 @@ kubectl get service cmdb
 - 只读根文件系统和内存临时目录。
 - CPU、内存请求与限制。
 - 禁止自动挂载 ServiceAccount Token。
-- 暴露 Prometheus 抓取注解，默认抓取 `/actuator/prometheus`。
+- 提供 Prometheus 抓取路径和端口注解；因监控接口要求管理员令牌，默认将 `prometheus.io/scrape` 设为 `false`。
 
-本地没有执行 Docker 镜像构建；需要部署到 Kubernetes 时，使用 CI/CD 或具备 Docker/BuildKit 的构建环境根据 `Dockerfile` 构建并推送镜像。
+注意：当前 Deployment 为双副本，而首次启动时管理员和默认项目初始化采用“先查询、再插入”。首次部署或空库恢复时应先单副本启动/预置初始化数据，再扩容，避免两个副本并发创建造成唯一键冲突。
+
+Dockerfile 的 Maven 正式打包步骤会执行测试；K8S 清单日志滚动配置为 8MB 单文件、7 个历史文件、56MB 总上限，`/tmp` 内存卷限制为 96Mi。
+
+2026-11-02 的发布为裸机 JAR 部署，没有更新 Docker 镜像或应用 K8S 清单；K8S 清单仍需在目标集群完成 dry-run 和环境配置校验。
 
 ### 13.3 健康检查接口
 
@@ -836,6 +864,8 @@ database/init.sql
 - 确认用户在 `sys_user` 中存在。
 - 确认 `enabled` 为 `1`。
 - 如果已经修改过管理员密码，请使用修改后的密码登录。
+- 新注册账号需要管理员在“用户权限”页面审核并启用。
+- 如果提示密码已过期，请使用“修改密码”完成更新；忘记密码请联系管理员重置。
 - 首次安装前请通过 `ADMIN_PASSWORD` 设置符合密码策略的管理员密码。
 
 ### 14.4 接口返回“登录已失效”
@@ -869,7 +899,9 @@ database/init.sql
 
 ## 15. 当前验证状态
 
-已完成以下验证：
+最近一次线上发布（2026-11-02，管理员与项目数据约束修复）：JDK 17 下 `mvn clean package` 成功，16 项测试全部通过；`node --check src/main/resources/static/app.js` 与 `git diff --check` 通过。JAR SHA-256 为 `37F2FBC3041CEFE1416BC91132809B4A841FC3EA853B110B57EA8BC5CE140AB8`，已部署到 `192.168.11.218:/opt/fusx/cmdb`。部署后 PID `7553`、readiness `UP`、首页 HTTP 200；静态脚本缓存版本已更新。此前发布备份为 `cmdb.jar.backup-20261102-admin-project-hardening`；本次回滚备份为 `cmdb.jar.backup-20261102-pre-delete-guard`。生产库已补建 `uk_cmdb_project_code`；部署仅更新裸机 JAR，未更新 Docker 镜像/K8S 工作负载。
+
+此前已完成以下功能验证：
 
 - Maven 打包成功。
 - Java 17 JAR 启动成功。

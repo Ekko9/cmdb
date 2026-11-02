@@ -20,6 +20,7 @@ services:
       LOG_FILE: /tmp/logs/cmdb.log
       LOG_MAX_FILE_SIZE: "${LOG_MAX_FILE_SIZE:-20MB}"
       LOG_MAX_HISTORY: "${LOG_MAX_HISTORY:-14}"
+      LOG_TOTAL_SIZE_CAP: "${LOG_TOTAL_SIZE_CAP:-512MB}"
     read_only: true
     tmpfs:
       - /tmp

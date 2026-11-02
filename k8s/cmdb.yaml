@@ -88,9 +88,11 @@ spec:
             - name: LOG_FILE
               value: /tmp/logs/cmdb.log
             - name: LOG_MAX_FILE_SIZE
-              value: 20MB
+              value: 8MB
             - name: LOG_MAX_HISTORY
-              value: "14"
+              value: "7"
+            - name: LOG_TOTAL_SIZE_CAP
+              value: 56MB
             - name: JAVA_TOOL_OPTIONS
               value: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/./urandom"
           startupProbe:
@@ -135,7 +137,7 @@ spec:
         - name: tmp
           emptyDir:
             medium: Memory
-            sizeLimit: 64Mi
+            sizeLimit: 96Mi
 ---
 apiVersion: v1
 kind: Service

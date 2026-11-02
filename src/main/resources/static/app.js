@@ -11,7 +11,11 @@ const api = async (path, options = {}) => {
   const response = await fetch('/api' + path, { ...options, headers });
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw Error(data.message || '请求失败');
+  if (!response.ok) {
+    const error = Error(data.message || '请求失败');
+    error.status = response.status;
+    throw error;
+  }
   return data;
 };
 
@@ -24,20 +28,28 @@ const loginTemplate = `
     </section>
     <section class="login-panel">
       <form class="login-card" @submit.prevent="login">
-        <h2>欢迎回来</h2>
-        <p class="sub">登录 Orbit CMDB 管理控制台</p>
+        <h2>{{ mode === 'register' ? '申请账号' : '欢迎回来' }}</h2>
+        <p class="sub">{{ mode === 'register' ? '注册后由管理员审核启用' : '登录 Orbit CMDB 管理控制台' }}</p>
         <div v-if="loginError" class="error">{{ loginError }}</div>
+        <div v-if="successMessage" class="notice">{{ successMessage }}</div>
         <div class="field">
           <label>用户名</label>
-          <input v-model.trim="loginForm.username" autocomplete="username" autofocus>
+          <input v-model.trim="loginForm.username" autocomplete="username" minlength="3" maxlength="50" required autofocus>
+        </div>
+        <div v-if="mode === 'register'" class="field">
+          <label>显示名称</label>
+          <input v-model.trim="registerForm.displayName" maxlength="100" autocomplete="name">
         </div>
         <div class="field">
           <label>密码</label>
-          <input v-model="loginForm.password" type="password" autocomplete="current-password">
+          <input v-model="loginForm.password" type="password" :autocomplete="mode === 'register' ? 'new-password' : 'current-password'" :minlength="mode === 'register' ? 8 : null" :pattern="mode === 'register' ? '(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}' : null" required>
         </div>
         <button class="primary" type="submit" style="width:100%" :disabled="busy">
-          {{ busy ? '登录中…' : '进入控制台' }}
+          {{ busy ? '请稍候…' : (mode === 'register' ? '提交注册申请' : '进入控制台') }}
         </button>
+        <p class="auth-links" v-if="mode === 'login'"><span class="auth-hint">密码遗忘请联系管理员重置</span><button class="link-btn" type="button" @click="mode = 'register'; clearMessages()">注册账号</button></p>
+        <p class="auth-hint" v-if="mode === 'register'">密码至少 8 位，需包含大小写字母、数字和特殊符号。新账号默认为停用的只读账号，等待管理员审核启用。</p>
+        <p class="auth-links" v-if="mode === 'register'"><button class="link-btn" type="button" @click="mode = 'login'; clearMessages()">返回登录</button></p>
       </form>
     </section>
   </div>`;
@@ -209,12 +221,13 @@ const appTemplate = `
       </section>
     </main>
 
-    <div v-if="showModal" class="modal-back" @click.self="close">
+    <div v-if="showModal" class="modal-back" @click.self="!passwordExpired && close()">
       <form class="modal" @submit.prevent="save">
         <div class="section-head">
           <h3>{{ modalType==='password' ? '修改密码' : (editing ? '编辑' : '新建') + (modalType==='asset' ? '资产' : modalType==='project' ? '项目' : '用户') }}</h3>
-          <button class="ghost close" type="button" @click="close">×</button>
+          <button v-if="!passwordExpired" class="ghost close" type="button" @click="close">×</button>
         </div>
+        <div v-if="passwordExpired" class="notice error">密码已超过 3 个月有效期，请先修改密码后继续使用。</div>
         <div class="form-grid">
           <template v-if="modalType==='password'">
             <div class="field wide"><label>当前密码 *</label><input type="password" v-model="form.currentPassword" autocomplete="current-password" required></div>
@@ -250,7 +263,7 @@ const appTemplate = `
             <div v-if="editing" class="field"><label>状态</label><select v-model="form.enabled"><option :value="true">启用</option><option :value="false">停用</option></select></div>
           </template>
         </div>
-        <div class="modal-actions"><button class="ghost" type="button" @click="close">取消</button><button class="primary" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存' }}</button></div>
+        <div class="modal-actions"><button v-if="!passwordExpired" class="ghost" type="button" @click="close">取消</button><button class="primary" type="submit" :disabled="saving">{{ saving ? '保存中…' : '保存' }}</button></div>
       </form>
     </div>
 
@@ -296,12 +309,21 @@ createApp({
     'login-form': {
       template: loginTemplate,
       props: { loginForm: Object, loginError: String },
-      data() { return { busy: false }; },
+      data() { return { busy: false, mode: 'login', successMessage: '', registerForm: { displayName: '' } }; },
       methods: {
+        clearMessages() { this.$root.loginError = ''; this.successMessage = ''; },
         async login() {
           this.busy = true;
           this.$root.loginError = '';
           try {
+            if (this.mode === 'register') {
+              const data = await api('/auth/register', { method: 'POST', body: JSON.stringify({ ...this.registerForm, username: this.loginForm.username, password: this.loginForm.password }) });
+              this.successMessage = data.message;
+              this.mode = 'login';
+              this.loginForm.password = '';
+              this.registerForm.displayName = '';
+              return;
+            }
             const data = await api('/auth/login', { method: 'POST', body: JSON.stringify(this.loginForm) });
             this.$root.token = data.token;
             this.$root.user = data.user;
@@ -327,6 +349,7 @@ createApp({
           auditPage: { page: 0, size: 5, totalElements: 0, totalPages: 0 },
           regionDraft: { continent: '', country: '' },
           showModal: false, modalType: '', editing: null, form: {}, loading: false, saving: false,
+          passwordExpired: Boolean(this.$root.user && this.$root.user.passwordExpired),
           notice: '', noticeType: 'success', importing: false
         };
       },
@@ -345,7 +368,13 @@ createApp({
         },
         knownRegionValues() { return this.regions.map(item => item.label); },
       },
-      mounted() { this.load(); },
+      mounted() {
+        if (this.user.passwordChangeRecommended && !this.user.passwordExpired) {
+          this.notice = `密码将在 ${this.user.passwordDaysRemaining} 天内到期，请及时修改。`;
+        }
+        if (this.passwordExpired) this.open('password');
+        this.load();
+      },
       methods: {
         assetTypeLabel(value) { return { SERVER: '服务器', DATABASE: '数据库', NETWORK: '网络设备', STORAGE: '存储设备', APPLICATION: '应用系统', OTHER: '其他' }[value] || value || '-'; },
         environmentLabel(value) { return { PRODUCTION: '生产环境', STAGING: '预发布环境', DEVELOPMENT: '开发环境' }[value] || value || '-'; },
@@ -371,7 +400,10 @@ createApp({
             if (this.tab === 'imports' && this.canWrite) await this.loadImports();
             if (this.tab === 'audits' && this.canManageUsers) await this.loadAudits();
           } catch (error) {
-            this.notify(error.message, 'error');
+            if (error.status === 428 || (this.user.passwordExpired && error.status === 401)) {
+              this.passwordExpired = true;
+              if (!(this.showModal && this.modalType === 'password')) this.open('password');
+            } else this.notify(error.message, 'error');
           } finally {
             this.loading = false;
           }
@@ -439,9 +471,12 @@ createApp({
         async changeImportPageSize() { this.importPage.page = 0; await this.loadImports(); },
         async changeAuditPageSize() { this.auditPage.page = 0; await this.loadAudits(); },
         logout() {
-          localStorage.clear();
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
           this.$root.token = '';
           this.$root.user = null;
+          this.$root.loginForm = { username: '', password: '' };
+          this.$root.loginError = '';
         },
         open(type, item) {
           this.modalType = type;
@@ -475,9 +510,13 @@ createApp({
           this.saving = true;
           try {
             if (this.modalType === 'password') {
-              await api('/account/password', { method: 'PUT', body: JSON.stringify(this.form) });
+              const passwordStatus = await api('/account/password', { method: 'PUT', body: JSON.stringify(this.form) });
+              this.$root.user = { ...this.user, ...passwordStatus };
+              localStorage.user = JSON.stringify(this.$root.user);
+              this.passwordExpired = false;
               this.close();
-              this.notify('密码修改成功，请使用新密码登录');
+              this.notify('密码修改成功');
+              await this.load();
               return;
             }
             const path = this.modalType === 'asset' ? '/assets' : this.modalType === 'project' ? '/projects' : '/users';

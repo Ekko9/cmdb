@@ -1,6 +1,7 @@
 package com.cmdb.controller;
 
 import com.cmdb.config.AuditService;
+import com.cmdb.config.BadRequestException;
 import com.cmdb.entity.User;
 import com.cmdb.repo.UserRepository;
 import jakarta.servlet.http.HttpServletRequest;
@@ -8,6 +9,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.time.LocalDateTime;
 
 @RestController
 @RequestMapping("/api/account")
@@ -25,27 +27,34 @@ public class AccountController {
     }
 
     @PutMapping("/password")
-    public void changePassword(HttpServletRequest request, @RequestBody Map<String, String> body) {
+    public Map<String, Object> changePassword(HttpServletRequest request, @RequestBody Map<String, String> body) {
         String username = (String) request.getAttribute("username");
         User user = users.findByUsername(username == null ? "" : username)
-                .orElseThrow(() -> new RuntimeException("用户不存在"));
+                .orElseThrow(() -> new com.cmdb.config.ResourceNotFoundException("用户不存在"));
         String currentPassword = body == null ? null : body.get("currentPassword");
         String newPassword = body == null ? null : body.get("newPassword");
         String confirmPassword = body == null ? null : body.get("confirmPassword");
         if (currentPassword == null || !encoder.matches(currentPassword, user.getPassword())) {
-            throw new RuntimeException("当前密码不正确");
+            throw new BadRequestException("当前密码不正确");
         }
         if (newPassword == null || !newPassword.matches(PASSWORD_PATTERN)) {
-            throw new RuntimeException("密码至少 8 位，且必须包含大写字母、小写字母、数字和特殊符号");
+            throw new BadRequestException("密码至少 8 位，且必须包含大写字母、小写字母、数字和特殊符号");
         }
         if (!newPassword.equals(confirmPassword)) {
-            throw new RuntimeException("两次输入的新密码不一致");
+            throw new BadRequestException("两次输入的新密码不一致");
         }
         if (encoder.matches(newPassword, user.getPassword())) {
-            throw new RuntimeException("新密码不能与当前密码相同");
+            throw new BadRequestException("新密码不能与当前密码相同");
         }
         user.setPassword(encoder.encode(newPassword));
+        user.setPasswordChangedAt(LocalDateTime.now());
         users.save(user);
         auditService.operation(request, "CHANGE_PASSWORD", "ACCOUNT", user.getId(), user.getUsername(), "SUCCESS", "用户自助修改密码");
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("passwordExpiresAt", com.cmdb.config.PasswordPolicy.expiresAt(user.getPasswordChangedAt()));
+        result.put("passwordDaysRemaining", com.cmdb.config.PasswordPolicy.daysRemaining(user.getPasswordChangedAt(), LocalDateTime.now()));
+        result.put("passwordExpired", false);
+        result.put("passwordChangeRecommended", false);
+        return result;
     }
 }

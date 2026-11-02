@@ -29,11 +29,36 @@ CREATE TABLE IF NOT EXISTS `sys_user` (
   `display_name` VARCHAR(100) NOT NULL,
   `role` VARCHAR(30) NOT NULL DEFAULT 'OPERATOR',
   `enabled` TINYINT(1) NOT NULL DEFAULT 1,
+  `password_changed_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `created_at` DATETIME(6) NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_sys_user_username` (`username`),
   KEY `idx_sys_user_role_enabled` (`role`, `enabled`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Upgrade existing installations without changing stored password hashes.
+SET @cmdb_password_changed_at_exists = (
+  SELECT COUNT(*)
+  FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'sys_user'
+    AND COLUMN_NAME = 'password_changed_at'
+);
+SET @cmdb_password_changed_at_sql = IF(
+  @cmdb_password_changed_at_exists = 0,
+  'ALTER TABLE `sys_user` ADD COLUMN `password_changed_at` DATETIME(6) NULL',
+  'SELECT 1'
+);
+PREPARE cmdb_password_changed_at_stmt FROM @cmdb_password_changed_at_sql;
+EXECUTE cmdb_password_changed_at_stmt;
+DEALLOCATE PREPARE cmdb_password_changed_at_stmt;
+
+UPDATE `sys_user`
+SET `password_changed_at` = CURRENT_TIMESTAMP(6)
+WHERE `password_changed_at` IS NULL;
+
+ALTER TABLE `sys_user`
+  MODIFY COLUMN `password_changed_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6);
 
 CREATE TABLE IF NOT EXISTS `cmdb_project` (
   `id` BIGINT NOT NULL AUTO_INCREMENT,
@@ -44,8 +69,26 @@ CREATE TABLE IF NOT EXISTS `cmdb_project` (
   `created_at` DATETIME(6) NULL,
   PRIMARY KEY (`id`),
   KEY `idx_cmdb_project_name` (`name`),
-  KEY `idx_cmdb_project_code` (`code`)
+  UNIQUE KEY `uk_cmdb_project_code` (`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Add project-code uniqueness to existing installations. Existing duplicates
+-- must be reconciled before applying this constraint.
+SET @cmdb_project_code_unique_exists = (
+  SELECT COUNT(*)
+  FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'cmdb_project'
+    AND INDEX_NAME = 'uk_cmdb_project_code'
+);
+SET @cmdb_project_code_unique_sql = IF(
+  @cmdb_project_code_unique_exists = 0,
+  'ALTER TABLE `cmdb_project` ADD UNIQUE KEY `uk_cmdb_project_code` (`code`)',
+  'SELECT 1'
+);
+PREPARE cmdb_project_code_unique_stmt FROM @cmdb_project_code_unique_sql;
+EXECUTE cmdb_project_code_unique_stmt;
+DEALLOCATE PREPARE cmdb_project_code_unique_stmt;
 
 CREATE TABLE IF NOT EXISTS `cmdb_asset_type` (
   `id` BIGINT NOT NULL AUTO_INCREMENT,

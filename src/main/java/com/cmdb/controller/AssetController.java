@@ -1,6 +1,9 @@
 package com.cmdb.controller;
 
 import com.cmdb.config.AuditService;
+import com.cmdb.config.BadRequestException;
+import com.cmdb.config.CsvExportSanitizer;
+import com.cmdb.config.ResourceNotFoundException;
 import com.cmdb.entity.Asset;
 import com.cmdb.entity.AssetTypeOption;
 import com.cmdb.entity.ImportAudit;
@@ -41,6 +44,8 @@ import java.util.*;
 @RestController
 @RequestMapping("/api/assets")
 public class AssetController {
+    private static final int MAX_IMPORT_ROWS = 10_000;
+    private static final int MAX_EXPORT_ROWS = 10_000;
     private final AssetRepository assets;
     private final ProjectRepository projects;
     private final AssetTypeOptionRepository assetTypes;
@@ -90,7 +95,7 @@ public class AssetController {
     @GetMapping("/{id}")
     @Transactional(readOnly = true)
     public Map<String, Object> detail(@PathVariable Long id) {
-        Asset asset = assets.findById(id).orElseThrow(() -> new RuntimeException("资产不存在"));
+        Asset asset = assets.findById(id).orElseThrow(() -> new ResourceNotFoundException("资产不存在"));
         Map<String, Object> result = view(asset);
         List<Map<String, Object>> changes = new ArrayList<>();
         for (com.cmdb.entity.AssetChange change : assetChanges.findTop100ByAssetIdOrderByCreatedAtDescIdDesc(id)) {
@@ -120,7 +125,7 @@ public class AssetController {
     @PutMapping("/{id}")
     @Transactional
     public Map<String, Object> update(HttpServletRequest request, @PathVariable Long id, @RequestBody Map<String, Object> body) {
-        Asset asset = assets.findById(id).orElseThrow(() -> new RuntimeException("资产不存在"));
+        Asset asset = assets.findById(id).orElseThrow(() -> new ResourceNotFoundException("资产不存在"));
         Map<String, String> before = snapshotMap(asset);
         Asset saved = assets.save(from(body, asset));
         recordAssetDiff(saved, before, auditService.operator(request));
@@ -131,7 +136,7 @@ public class AssetController {
     @DeleteMapping("/{id}")
     @Transactional
     public void delete(HttpServletRequest request, @PathVariable Long id) {
-        Asset asset = assets.findById(id).orElseThrow(() -> new RuntimeException("资产不存在"));
+        Asset asset = assets.findById(id).orElseThrow(() -> new ResourceNotFoundException("资产不存在"));
         auditService.assetChange(asset.getId(), asset.getName(), "DELETE", null, snapshot(asset), null, auditService.operator(request));
         assets.delete(asset);
         auditService.operation(request, "DELETE", "ASSET", id, asset.getName(), "SUCCESS", "删除资产");
@@ -163,11 +168,11 @@ public class AssetController {
     @Transactional
     public Map<String, Object> importCsv(HttpServletRequest request, @RequestParam("file") MultipartFile file) throws IOException {
         if (file == null || file.isEmpty()) {
-            throw new RuntimeException("请选择 CSV 或 Excel 文件");
+            throw new BadRequestException("请选择 CSV 或 Excel 文件");
         }
         String filename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename().toLowerCase(Locale.ROOT);
         if (!filename.endsWith(".xlsx") && !filename.endsWith(".csv")) {
-            throw new RuntimeException("仅支持 .csv 或 .xlsx 文件");
+            throw new BadRequestException("仅支持 .csv 或 .xlsx 文件");
         }
         ImportAudit audit = new ImportAudit();
         audit.setFilename(file.getOriginalFilename() == null ? "unknown" : file.getOriginalFilename());
@@ -208,12 +213,13 @@ public class AssetController {
     @GetMapping("/imports/{id}/failures.csv")
     @Transactional(readOnly = true)
     public ResponseEntity<byte[]> importFailures(@PathVariable Long id) throws IOException {
-        ImportAudit audit = importAudits.findById(id).orElseThrow(() -> new RuntimeException("导入记录不存在"));
+        ImportAudit audit = importAudits.findById(id).orElseThrow(() -> new ResourceNotFoundException("导入记录不存在"));
         StringWriter writer = new StringWriter();
         CSVFormat format = CSVFormat.DEFAULT.builder().setHeader("行号", "失败原因", "原始数据").build();
         try (CSVPrinter printer = new CSVPrinter(writer, format)) {
             for (ImportFailure failure : importFailures.findByImportAuditOrderByRowNumberAscIdAsc(audit)) {
-                printer.printRecord(failure.getRowNumber(), failure.getReason(), failure.getRawData());
+                printer.printRecord(failure.getRowNumber(), CsvExportSanitizer.sanitize(failure.getReason()),
+                        CsvExportSanitizer.sanitize(failure.getRawData()));
             }
         }
         return fileResponse(("\uFEFF" + writer).getBytes(StandardCharsets.UTF_8),
@@ -234,6 +240,9 @@ public class AssetController {
              CSVParser parser = new CSVParser(reader, format)) {
             for (CSVRecord record : parser) {
                 totalRows++;
+                if (totalRows > MAX_IMPORT_ROWS) {
+                    throw new BadRequestException("单次最多导入 " + MAX_IMPORT_ROWS + " 行");
+                }
                 long line = record.getRecordNumber() + 1;
                 if (record.size() < 7) {
                     skipped++;
@@ -269,16 +278,18 @@ public class AssetController {
     @Transactional(readOnly = true)
     public ResponseEntity<byte[]> exportCsv(@RequestParam(required = false) Long projectId,
                                             @RequestParam(required = false) String keyword) throws IOException {
-        List<Asset> all = assets.findAll(spec(projectId, keyword), Sort.by(Sort.Direction.DESC, "updatedAt"));
+        List<Asset> all = exportAssets(projectId, keyword);
         StringWriter writer = new StringWriter();
         CSVFormat format = CSVFormat.DEFAULT.builder()
                 .setHeader("名称", "类型", "环境", "内网IP", "外网IP", "主机名", "项目名称", "状态", "区域", "描述")
                 .build();
         try (CSVPrinter printer = new CSVPrinter(writer, format)) {
             for (Asset asset : all) {
-                printer.printRecord(asset.getName(), asset.getAssetType(), asset.getEnvironment(),
-                        asset.getPrivateIp(), asset.getPublicIp(), asset.getHostname(),
-                        asset.getProject().getName(), asset.getStatus(), asset.getRegion(), asset.getDescription());
+                printer.printRecord(CsvExportSanitizer.sanitize(asset.getName()), CsvExportSanitizer.sanitize(asset.getAssetType()),
+                        CsvExportSanitizer.sanitize(asset.getEnvironment()), CsvExportSanitizer.sanitize(asset.getPrivateIp()),
+                        CsvExportSanitizer.sanitize(asset.getPublicIp()), CsvExportSanitizer.sanitize(asset.getHostname()),
+                        CsvExportSanitizer.sanitize(asset.getProject().getName()), CsvExportSanitizer.sanitize(asset.getStatus()),
+                        CsvExportSanitizer.sanitize(asset.getRegion()), CsvExportSanitizer.sanitize(asset.getDescription()));
             }
         }
         HttpHeaders headers = new HttpHeaders();
@@ -291,7 +302,7 @@ public class AssetController {
     @Transactional(readOnly = true)
     public ResponseEntity<byte[]> exportExcel(@RequestParam(required = false) Long projectId,
                                               @RequestParam(required = false) String keyword) throws IOException {
-        List<Asset> all = assets.findAll(spec(projectId, keyword), Sort.by(Sort.Direction.DESC, "updatedAt"));
+        List<Asset> all = exportAssets(projectId, keyword);
         try (Workbook workbook = new XSSFWorkbook(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             Sheet sheet = workbook.createSheet("资产清单");
             String[] headers = {"名称", "类型", "环境", "内网IP", "外网IP", "主机名", "项目名称", "状态", "区域", "描述"};
@@ -315,6 +326,15 @@ public class AssetController {
             return fileResponse(output.toByteArray(), "cmdb-assets.xlsx",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         }
+    }
+
+    private List<Asset> exportAssets(Long projectId, String keyword) {
+        Pageable pageable = PageRequest.of(0, MAX_EXPORT_ROWS + 1, Sort.by(Sort.Direction.DESC, "updatedAt"));
+        List<Asset> result = assets.findAll(spec(projectId, keyword), pageable).getContent();
+        if (result.size() > MAX_EXPORT_ROWS) {
+            throw new BadRequestException("单次最多导出 " + MAX_EXPORT_ROWS + " 条资产，请先缩小筛选范围");
+        }
+        return result;
     }
 
     @GetMapping("/template.xlsx")
@@ -369,13 +389,13 @@ public class AssetController {
     }
 
     private Asset from(Map<String, Object> body, Asset asset) {
-        if (body == null) throw new RuntimeException("请求数据不能为空");
+        if (body == null) throw new BadRequestException("请求数据不能为空");
         String name = text(body, "name");
-        if (name == null) throw new RuntimeException("资产名称不能为空");
-        if (name.length() > 100) throw new RuntimeException("资产名称不能超过 100 个字符");
+        if (name == null) throw new BadRequestException("资产名称不能为空");
+        if (name.length() > 100) throw new BadRequestException("资产名称不能超过 100 个字符");
         asset.setName(name);
         String type = text(body, "assetType");
-        if (type != null && !assetTypeCodes().contains(type.toUpperCase(Locale.ROOT))) throw new RuntimeException("资产类型无效：" + type);
+        if (type != null && !assetTypeCodes().contains(type.toUpperCase(Locale.ROOT))) throw new BadRequestException("资产类型无效：" + type);
         asset.setAssetType(type == null ? null : type.toUpperCase(Locale.ROOT));
         asset.setEnvironment(enumValue(body, "environment", Set.of("PRODUCTION", "STAGING", "DEVELOPMENT"), "PRODUCTION"));
         asset.setPrivateIp(ipValue(body, "privateIp"));
@@ -388,18 +408,18 @@ public class AssetController {
         Object projectId = body.get("projectId");
         if (projectName != null) {
             List<com.cmdb.entity.Project> matches = projects.findByNameIgnoreCase(projectName);
-            if (matches.isEmpty()) throw new RuntimeException("项目不存在：" + projectName);
-            if (matches.size() > 1) throw new RuntimeException("项目名称重复，请先清理重复项目：" + projectName);
+            if (matches.isEmpty()) throw new BadRequestException("项目不存在：" + projectName);
+            if (matches.size() > 1) throw new BadRequestException("项目名称重复，请先清理重复项目：" + projectName);
             asset.setProject(matches.get(0));
         } else if (projectId != null && !String.valueOf(projectId).trim().isEmpty()) {
             try {
                 asset.setProject(projects.findById(Long.valueOf(String.valueOf(projectId).trim()))
-                        .orElseThrow(() -> new RuntimeException("项目不存在")));
+                        .orElseThrow(() -> new BadRequestException("项目不存在")));
             } catch (NumberFormatException ex) {
-                throw new RuntimeException("项目 ID 无效");
+                throw new BadRequestException("项目 ID 无效");
             }
         } else if (asset.getProject() == null) {
-            throw new RuntimeException("项目不能为空");
+            throw new BadRequestException("项目不能为空");
         }
         return asset;
     }
@@ -408,7 +428,7 @@ public class AssetController {
         String value = text(body, key);
         if (value == null) return fallback;
         value = value.toUpperCase(Locale.ROOT);
-        if (!allowed.contains(value)) throw new RuntimeException(key + " 值无效：" + value);
+        if (!allowed.contains(value)) throw new BadRequestException(key + " 值无效：" + value);
         return value;
     }
 
@@ -416,13 +436,13 @@ public class AssetController {
         String value = text(body, key);
         if (value == null) return null;
         if (value.length() > 45 || !value.matches("^[0-9A-Fa-f:.]+$") || !value.contains("." ) && !value.contains(":")) {
-            throw new RuntimeException(key + " 不是有效的 IP 地址");
+            throw new BadRequestException(key + " 不是有效的 IP 地址");
         }
         return value;
     }
 
     private String limitText(String value, int max, String label) {
-        if (value != null && value.length() > max) throw new RuntimeException(label + "不能超过 " + max + " 个字符");
+        if (value != null && value.length() > max) throw new BadRequestException(label + "不能超过 " + max + " 个字符");
         return value;
     }
 
@@ -436,6 +456,9 @@ public class AssetController {
         Set<String> seenPublicIps = new HashSet<>();
         try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
             Sheet sheet = workbook.getSheetAt(0);
+            if (sheet.getLastRowNum() > MAX_IMPORT_ROWS) {
+                throw new BadRequestException("单次最多导入 " + MAX_IMPORT_ROWS + " 行");
+            }
             DataFormatter formatter = new DataFormatter();
             for (int i = 1; i <= sheet.getLastRowNum(); i++) {
                 Row row = sheet.getRow(i);
@@ -475,22 +498,22 @@ public class AssetController {
         String publicIpKey = normalizeKey(asset.getPublicIp());
 
         if (!seenNames.add(nameKey)) {
-            throw new RuntimeException("文件内存在重复资产：同一项目下资产名称“" + asset.getName() + "”重复");
+            throw new BadRequestException("文件内存在重复资产：同一项目下资产名称“" + asset.getName() + "”重复");
         }
         if (privateIpKey != null && !seenPrivateIps.add(privateIpKey)) {
-            throw new RuntimeException("文件内存在重复内网 IP：" + asset.getPrivateIp());
+            throw new BadRequestException("文件内存在重复内网 IP：" + asset.getPrivateIp());
         }
         if (publicIpKey != null && !seenPublicIps.add(publicIpKey)) {
-            throw new RuntimeException("文件内存在重复外网 IP：" + asset.getPublicIp());
+            throw new BadRequestException("文件内存在重复外网 IP：" + asset.getPublicIp());
         }
         if (assets.existsByNameIgnoreCaseAndProjectId(asset.getName(), asset.getProject().getId())) {
-            throw new RuntimeException("数据库中已存在同一项目资产：" + asset.getName());
+            throw new BadRequestException("数据库中已存在同一项目资产：" + asset.getName());
         }
         if (privateIpKey != null && assets.existsByPrivateIpIgnoreCase(asset.getPrivateIp())) {
-            throw new RuntimeException("数据库中已存在内网 IP：" + asset.getPrivateIp());
+            throw new BadRequestException("数据库中已存在内网 IP：" + asset.getPrivateIp());
         }
         if (publicIpKey != null && assets.existsByPublicIpIgnoreCase(asset.getPublicIp())) {
-            throw new RuntimeException("数据库中已存在外网 IP：" + asset.getPublicIp());
+            throw new BadRequestException("数据库中已存在外网 IP：" + asset.getPublicIp());
         }
         try {
             return assets.save(asset);
@@ -520,10 +543,11 @@ public class AssetController {
         ImportFailure failure = new ImportFailure();
         failure.setImportAudit(audit);
         failure.setRowNumber(rowNumber);
-        failure.setReason(reason == null ? "导入失败" : reason);
+        String failureReason = reason == null ? "导入失败" : reason;
+        failure.setReason(failureReason);
         failure.setRawData(rawData == null || rawData.length() <= 2000 ? rawData : rawData.substring(0, 2000));
         importFailures.save(failure);
-        errors.add("第 " + rowNumber + " 行：" + failure.getReason());
+        errors.add("第 " + rowNumber + " 行：" + failureReason);
     }
 
     private void finishImport(ImportAudit audit, int totalRows, int imported, int skipped) {

@@ -18,5 +18,9 @@ public class User {
     @Column(length = 30) private String role = "OPERATOR";
     @Column(nullable = false) private Boolean enabled = true;
     private LocalDateTime createdAt;
-    @PrePersist public void prePersist() { createdAt = LocalDateTime.now(); }
+    @Column(nullable = false) private LocalDateTime passwordChangedAt;
+    @PrePersist public void prePersist() {
+        createdAt = LocalDateTime.now();
+        if (passwordChangedAt == null) passwordChangedAt = createdAt;
+    }
 }

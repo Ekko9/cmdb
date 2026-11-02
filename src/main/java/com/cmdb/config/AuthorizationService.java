@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.stereotype.Service;
 
 import java.util.Locale;
+import java.time.LocalDateTime;
 
 @Service
 public class AuthorizationService {
@@ -21,6 +22,12 @@ public class AuthorizationService {
                 .filter(user -> Boolean.TRUE.equals(user.getEnabled()))
                 .map(User::getRole)
                 .orElse(null);
+    }
+
+    public boolean isPasswordExpired(String username) {
+        return users.findByUsername(username)
+                .map(user -> PasswordPolicy.isExpired(user.getPasswordChangedAt(), LocalDateTime.now()))
+                .orElse(true);
     }
 
     public boolean isAllowed(HttpServletRequest request, String role) {

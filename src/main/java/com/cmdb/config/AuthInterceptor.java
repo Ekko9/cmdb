@@ -27,6 +27,13 @@ public class AuthInterceptor implements HandlerInterceptor {
             unauthorized(response, "用户已停用或不存在");
             return false;
         }
+        boolean passwordChangeRequest = uri.equals("/api/account/password") && HttpMethod.PUT.matches(request.getMethod());
+        if (!passwordChangeRequest && authorizationService.isPasswordExpired(username)) {
+            response.setStatus(428);
+            response.setContentType("application/json;charset=UTF-8");
+            response.getWriter().write("{\"message\":\"密码已超过 3 个月有效期，请先修改密码\",\"code\":\"PASSWORD_EXPIRED\"}");
+            return false;
+        }
         if (uri.startsWith("/actuator/")) {
             if (!"ADMIN".equalsIgnoreCase(role)) {
                 forbidden(response);
