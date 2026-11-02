@@ -8,4 +8,5 @@ import java.util.List;
 
 public interface ImportFailureRepository extends JpaRepository<ImportFailure, Long> {
     List<ImportFailure> findByImportAuditOrderByRowNumberAscIdAsc(ImportAudit importAudit);
+    long countByImportAudit(ImportAudit importAudit);
 }

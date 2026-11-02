@@ -34,6 +34,9 @@ public class OperationAudit {
     private String message;
     @Column(length = 64)
     private String clientIp;
+    @Column(nullable = false)
+    private boolean archived = false;
+    private LocalDateTime archivedAt;
     private LocalDateTime createdAt;
 
     @PrePersist

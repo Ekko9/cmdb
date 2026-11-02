@@ -46,6 +46,7 @@ import java.util.*;
 public class AssetController {
     private static final int MAX_IMPORT_ROWS = 10_000;
     private static final int MAX_EXPORT_ROWS = 10_000;
+    private enum DuplicateStrategy { SKIP, MERGE }
     private final AssetRepository assets;
     private final ProjectRepository projects;
     private final AssetTypeOptionRepository assetTypes;
@@ -142,6 +143,24 @@ public class AssetController {
         auditService.operation(request, "DELETE", "ASSET", id, asset.getName(), "SUCCESS", "删除资产");
     }
 
+    @DeleteMapping("/batch")
+    @Transactional
+    public Map<String, Object> deleteBatch(HttpServletRequest request, @RequestBody List<Long> ids) {
+        if (ids == null || ids.isEmpty()) throw new BadRequestException("请先选择要删除的资产");
+        if (ids.size() > 100) throw new BadRequestException("单次最多删除 100 项资产");
+        Set<Long> uniqueIds = new LinkedHashSet<>(ids);
+        if (uniqueIds.contains(null)) throw new BadRequestException("资产 ID 不能为空");
+        List<Asset> selected = assets.findAllById(uniqueIds);
+        if (selected.size() != uniqueIds.size()) throw new ResourceNotFoundException("部分资产不存在或已被删除，请刷新列表后重试");
+        String operator = auditService.operator(request);
+        for (Asset asset : selected) {
+            auditService.assetChange(asset.getId(), asset.getName(), "DELETE", null, snapshot(asset), null, operator);
+            auditService.operation(request, "DELETE", "ASSET", asset.getId(), asset.getName(), "SUCCESS", "批量删除资产");
+        }
+        assets.deleteAll(selected);
+        return Map.of("deletedCount", selected.size());
+    }
+
     @GetMapping("/types")
     @Transactional(readOnly = true)
     public List<String> types() {
@@ -166,10 +185,12 @@ public class AssetController {
 
     @PostMapping("/import")
     @Transactional
-    public Map<String, Object> importCsv(HttpServletRequest request, @RequestParam("file") MultipartFile file) throws IOException {
+    public Map<String, Object> importCsv(HttpServletRequest request, @RequestParam("file") MultipartFile file,
+                                         @RequestParam(defaultValue = "SKIP") String duplicateStrategy) throws IOException {
         if (file == null || file.isEmpty()) {
             throw new BadRequestException("请选择 CSV 或 Excel 文件");
         }
+        DuplicateStrategy strategy = duplicateStrategy(duplicateStrategy);
         String filename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename().toLowerCase(Locale.ROOT);
         if (!filename.endsWith(".xlsx") && !filename.endsWith(".csv")) {
             throw new BadRequestException("仅支持 .csv 或 .xlsx 文件");
@@ -180,8 +201,8 @@ public class AssetController {
         audit.setOperator(auditService.operator(request));
         audit = importAudits.save(audit);
         Map<String, Object> result;
-        if (filename.endsWith(".xlsx")) result = importExcel(request, file, audit);
-        else result = importCsvFile(request, file, audit);
+        if (filename.endsWith(".xlsx")) result = importExcel(request, file, audit, strategy);
+        else result = importCsvFile(request, file, audit, strategy);
         String operationResult = "SUCCESS";
         if (((Number) result.get("count")).intValue() == 0 && ((Number) result.get("skipped")).intValue() > 0) {
             operationResult = "FAILED";
@@ -189,9 +210,122 @@ public class AssetController {
             operationResult = "PARTIAL";
         }
         auditService.operation(request, "IMPORT", "ASSET", audit.getId(), audit.getFilename(), operationResult,
-                "导入成功 " + result.get("count") + " 条，失败 " + result.get("skipped") + " 条");
+                "导入成功 " + result.get("count") + " 条，失败 " + result.get("skipped") + " 条，重复策略 " + strategy);
         return result;
     }
+
+    @PostMapping("/import/validate")
+    @Transactional(readOnly = true)
+    public Map<String, Object> validateImport(@RequestParam("file") MultipartFile file,
+                                              @RequestParam(defaultValue = "SKIP") String duplicateStrategy) throws IOException {
+        validateImportFile(file);
+        DuplicateStrategy strategy = duplicateStrategy(duplicateStrategy);
+        String filename = file.getOriginalFilename().toLowerCase(Locale.ROOT);
+        return filename.endsWith(".xlsx") ? validateExcel(file, strategy) : validateCsv(file, strategy);
+    }
+
+    private void validateImportFile(MultipartFile file) {
+        if (file == null || file.isEmpty()) throw new BadRequestException("请选择 CSV 或 Excel 文件");
+        String filename = file.getOriginalFilename() == null ? "" : file.getOriginalFilename().toLowerCase(Locale.ROOT);
+        if (!filename.endsWith(".xlsx") && !filename.endsWith(".csv")) throw new BadRequestException("仅支持 .csv 或 .xlsx 文件");
+    }
+
+    private DuplicateStrategy duplicateStrategy(String value) {
+        try { return DuplicateStrategy.valueOf(value == null ? "SKIP" : value.trim().toUpperCase(Locale.ROOT)); }
+        catch (IllegalArgumentException ex) { throw new BadRequestException("重复资产策略仅支持 SKIP 或 MERGE"); }
+    }
+
+    private Map<String, Object> validateCsv(MultipartFile file, DuplicateStrategy strategy) throws IOException {
+        List<Map<String, Object>> errors = new ArrayList<>(); int total = 0, valid = 0;
+        Set<String> names = new HashSet<>(), privateIps = new HashSet<>(), publicIps = new HashSet<>();
+        CSVFormat format = CSVFormat.DEFAULT.builder().setSkipHeaderRecord(true).setHeader().setTrim(true).build();
+        try (Reader reader = new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8); CSVParser parser = new CSVParser(reader, format)) {
+            for (CSVRecord record : parser) {
+                total++; if (total > MAX_IMPORT_ROWS) throw new BadRequestException("单次最多导入 " + MAX_IMPORT_ROWS + " 行");
+                Map<String, Object> body = csvBody(record); String reason = record.size() < 7 ? "字段不足，至少需要 7 列" : validateCandidate(body, strategy, names, privateIps, publicIps);
+                if (reason == null) valid++; else if (errors.size() < 200) errors.add(Map.of("rowNumber", record.getRecordNumber() + 1, "reason", reason, "rawData", recordData(record)));
+            }
+        }
+        return validationResult(total, valid, errors, strategy);
+    }
+
+    private Map<String, Object> validateExcel(MultipartFile file, DuplicateStrategy strategy) throws IOException {
+        List<Map<String, Object>> errors = new ArrayList<>(); int total = 0, valid = 0;
+        Set<String> names = new HashSet<>(), privateIps = new HashSet<>(), publicIps = new HashSet<>();
+        try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
+            Sheet sheet = workbook.getSheetAt(0); if (sheet.getLastRowNum() > MAX_IMPORT_ROWS) throw new BadRequestException("单次最多导入 " + MAX_IMPORT_ROWS + " 行");
+            DataFormatter formatter = new DataFormatter();
+            for (int i = 1; i <= sheet.getLastRowNum(); i++) {
+                Row row = sheet.getRow(i); if (row == null || isBlank(row, formatter)) continue; total++;
+                Map<String, Object> body = new HashMap<>();
+                body.put("name", cell(row, 0, formatter)); body.put("assetType", cell(row, 1, formatter)); body.put("environment", cell(row, 2, formatter));
+                body.put("privateIp", cell(row, 3, formatter)); body.put("publicIp", cell(row, 4, formatter)); body.put("hostname", cell(row, 5, formatter));
+                body.put("projectName", cell(row, 6, formatter)); body.put("status", cell(row, 7, formatter)); body.put("region", cell(row, 8, formatter));
+                body.put("description", cell(row, 9, formatter));
+                String reason = validateCandidate(body, strategy, names, privateIps, publicIps);
+                if (reason == null) valid++; else if (errors.size() < 200) errors.add(Map.of("rowNumber", i + 1, "reason", reason, "rawData", rowData(row, formatter)));
+            }
+        }
+        return validationResult(total, valid, errors, strategy);
+    }
+
+    private String validateCandidate(Map<String, Object> body, DuplicateStrategy strategy, Set<String> names,
+                                     Set<String> privateIps, Set<String> publicIps) {
+        try {
+            Asset candidate = from(body, new Asset());
+            String nameKey = candidate.getProject().getId() + "|" + normalizeKey(candidate.getName());
+            String privateKey = normalizeKey(candidate.getPrivateIp()), publicKey = normalizeKey(candidate.getPublicIp());
+            boolean repeated = !names.add(nameKey) || privateKey != null && !privateIps.add(privateKey) || publicKey != null && !publicIps.add(publicKey);
+            Asset byName = assets.findByNameIgnoreCaseAndProjectId(candidate.getName(), candidate.getProject().getId()).orElse(null);
+            Asset byPrivateIp = candidate.getPrivateIp() == null ? null : assets.findByPrivateIpIgnoreCase(candidate.getPrivateIp()).orElse(null);
+            Asset byPublicIp = candidate.getPublicIp() == null ? null : assets.findByPublicIpIgnoreCase(candidate.getPublicIp()).orElse(null);
+            if (strategy == DuplicateStrategy.SKIP && (repeated || byName != null || byPrivateIp != null || byPublicIp != null)) return "检测到重复资产；当前策略为跳过";
+            if (strategy == DuplicateStrategy.MERGE) {
+                Set<Long> ids = new HashSet<>(); if (byName != null) ids.add(byName.getId()); if (byPrivateIp != null) ids.add(byPrivateIp.getId()); if (byPublicIp != null) ids.add(byPublicIp.getId());
+                if (ids.size() > 1) return "名称和 IP 分别匹配到不同资产，无法安全合并";
+            }
+            return null;
+        } catch (RuntimeException ex) { return ex.getMessage() == null ? "字段校验失败" : ex.getMessage(); }
+    }
+
+    private Map<String, Object> csvBody(CSVRecord record) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("name", record.size() > 0 ? record.get(0) : ""); body.put("assetType", record.size() > 1 ? record.get(1) : "");
+        body.put("environment", record.size() > 2 ? record.get(2) : ""); body.put("privateIp", record.size() > 3 ? record.get(3) : "");
+        body.put("publicIp", record.size() > 4 ? record.get(4) : ""); body.put("hostname", record.size() > 5 ? record.get(5) : "");
+        body.put("projectName", record.size() > 6 ? record.get(6) : ""); body.put("status", record.size() > 7 ? record.get(7) : "");
+        body.put("region", record.size() > 8 ? record.get(8) : ""); body.put("description", record.size() > 9 ? record.get(9) : "");
+        return body;
+    }
+
+    private Map<String, Object> validationResult(int total, int valid, List<Map<String, Object>> errors, DuplicateStrategy strategy) {
+        Map<String, Object> result = new LinkedHashMap<>(); result.put("totalRows", total); result.put("validRows", valid);
+        result.put("failedRows", total - valid); result.put("duplicateStrategy", strategy.name()); result.put("errors", errors);
+        result.put("errorsTruncated", total - valid > errors.size()); return result;
+    }
+
+    private String recordData(CSVRecord record) {
+        try { StringWriter writer = new StringWriter(); try (CSVPrinter printer = new CSVPrinter(writer, CSVFormat.DEFAULT)) { printer.printRecord(record); } return writer.toString().trim(); }
+        catch (IOException ex) { return record.toString(); }
+    }
+
+    private Map<String, Object> failureView(ImportFailure failure) {
+        Map<String, Object> row = new LinkedHashMap<>(); row.put("id", failure.getId()); row.put("rowNumber", failure.getRowNumber());
+        row.put("reason", failure.getReason()); row.put("rawData", failure.getRawData());
+        try (CSVParser parser = CSVParser.parse(failure.getRawData(), CSVFormat.DEFAULT)) {
+            if (parser.iterator().hasNext()) {
+                CSVRecord data = parser.iterator().next();
+                Map<String, Object> asset = new LinkedHashMap<>();
+                asset.put("name", value(data, 0)); asset.put("assetType", value(data, 1)); asset.put("environment", value(data, 2));
+                asset.put("privateIp", value(data, 3)); asset.put("publicIp", value(data, 4)); asset.put("hostname", value(data, 5));
+                asset.put("projectName", value(data, 6)); asset.put("status", value(data, 7)); asset.put("region", value(data, 8));
+                asset.put("description", value(data, 9)); row.put("asset", asset);
+            }
+        } catch (IOException ignored) { }
+        return row;
+    }
+
+    private String value(CSVRecord row, int index) { return row.size() > index ? row.get(index) : ""; }
 
     @GetMapping("/imports")
     @Transactional(readOnly = true)
@@ -226,7 +360,36 @@ public class AssetController {
                 "cmdb-import-failures-" + id + ".csv", "text/csv;charset=UTF-8");
     }
 
-    private Map<String, Object> importCsvFile(HttpServletRequest request, MultipartFile file, ImportAudit audit) throws IOException {
+    @GetMapping("/imports/{id}/failures")
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> importFailureRows(@PathVariable Long id) {
+        ImportAudit audit = importAudits.findById(id).orElseThrow(() -> new ResourceNotFoundException("导入记录不存在"));
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (ImportFailure failure : importFailures.findByImportAuditOrderByRowNumberAscIdAsc(audit)) result.add(failureView(failure));
+        return result;
+    }
+
+    @PutMapping("/imports/{importId}/failures/{failureId}/retry")
+    @Transactional
+    public Map<String, Object> retryImportFailure(HttpServletRequest request, @PathVariable Long importId,
+                                                   @PathVariable Long failureId, @RequestBody Map<String, Object> body,
+                                                   @RequestParam(defaultValue = "MERGE") String duplicateStrategy) {
+        ImportAudit importAudit = importAudits.findById(importId).orElseThrow(() -> new ResourceNotFoundException("导入记录不存在"));
+        ImportFailure failure = importFailures.findById(failureId).orElseThrow(() -> new ResourceNotFoundException("失败行不存在"));
+        if (!failure.getImportAudit().getId().equals(importId)) throw new BadRequestException("失败行不属于该导入记录");
+        Asset asset = saveImportedAsset(request, body, new HashSet<>(), new HashSet<>(), new HashSet<>(), duplicateStrategy(duplicateStrategy));
+        auditService.assetChange(asset.getId(), asset.getName(), "IMPORT_RETRY", null, null, snapshot(asset), auditService.operator(request));
+        importFailures.delete(failure);
+        importAudit.setSuccessCount(importAudit.getSuccessCount() + 1);
+        importAudit.setFailedCount(Math.max(0, importAudit.getFailedCount() - 1));
+        importAudit.setStatus(importAudit.getFailedCount() == 0 ? "SUCCESS" : "PARTIAL");
+        importAudit.setCompletedAt(LocalDateTime.now());
+        importAudits.save(importAudit);
+        auditService.operation(request, "IMPORT_RETRY", "ASSET", asset.getId(), asset.getName(), "SUCCESS", "在线修正导入失败行 " + failure.getRowNumber());
+        return Map.of("asset", view(asset), "remainingFailures", importAudit.getFailedCount(), "importStatus", importAudit.getStatus());
+    }
+
+    private Map<String, Object> importCsvFile(HttpServletRequest request, MultipartFile file, ImportAudit audit, DuplicateStrategy strategy) throws IOException {
         int imported = 0;
         int skipped = 0;
         int totalRows = 0;
@@ -261,12 +424,12 @@ public class AssetController {
                     body.put("status", record.size() > 7 ? record.get(7) : "ONLINE");
                     body.put("region", record.size() > 8 ? record.get(8) : null);
                     body.put("description", record.size() > 9 ? record.get(9) : null);
-                    Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps);
+                    Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps, strategy);
                     auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
                 } catch (RuntimeException ex) {
                     skipped++;
-                    addImportFailure(audit, (int) line, ex.getMessage(), record.toString(), errors);
+                    addImportFailure(audit, (int) line, ex.getMessage(), recordData(record), errors);
                 }
             }
         }
@@ -402,6 +565,9 @@ public class AssetController {
         asset.setPublicIp(ipValue(body, "publicIp"));
         asset.setHostname(limitText(text(body, "hostname"), 100, "主机名"));
         asset.setStatus(enumValue(body, "status", Set.of("ONLINE", "OFFLINE", "MAINTENANCE"), "ONLINE"));
+        if (asset.getId() == null && text(body, "lifecycleState") != null) {
+            asset.setLifecycleState(enumValue(body, "lifecycleState", Set.of("PLANNED", "IN_SERVICE", "RETIRING", "RETIRED"), "IN_SERVICE"));
+        }
         asset.setRegion(limitText(text(body, "region"), 100, "区域"));
         asset.setDescription(limitText(text(body, "description"), 500, "描述"));
         String projectName = text(body, "projectName");
@@ -446,7 +612,7 @@ public class AssetController {
         return value;
     }
 
-    private Map<String, Object> importExcel(HttpServletRequest request, MultipartFile file, ImportAudit audit) throws IOException {
+    private Map<String, Object> importExcel(HttpServletRequest request, MultipartFile file, ImportAudit audit, DuplicateStrategy strategy) throws IOException {
         int imported = 0;
         int skipped = 0;
         int totalRows = 0;
@@ -476,7 +642,7 @@ public class AssetController {
                     body.put("status", cell(row, 7, formatter));
                     body.put("region", cell(row, 8, formatter));
                     body.put("description", cell(row, 9, formatter));
-                    Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps);
+                    Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps, strategy);
                     auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
                 } catch (RuntimeException ex) {
@@ -491,28 +657,44 @@ public class AssetController {
 
     private Asset saveImportedAsset(HttpServletRequest request, Map<String, Object> body,
                                     Set<String> seenNames, Set<String> seenPrivateIps,
-                                    Set<String> seenPublicIps) {
+                                    Set<String> seenPublicIps, DuplicateStrategy strategy) {
         Asset asset = from(body, new Asset());
         String nameKey = asset.getProject().getId() + "|" + normalizeKey(asset.getName());
         String privateIpKey = normalizeKey(asset.getPrivateIp());
         String publicIpKey = normalizeKey(asset.getPublicIp());
 
-        if (!seenNames.add(nameKey)) {
+        boolean duplicateInFile = !seenNames.add(nameKey);
+        if (duplicateInFile && strategy == DuplicateStrategy.SKIP) {
             throw new BadRequestException("文件内存在重复资产：同一项目下资产名称“" + asset.getName() + "”重复");
         }
-        if (privateIpKey != null && !seenPrivateIps.add(privateIpKey)) {
+        boolean duplicatePrivateIp = privateIpKey != null && !seenPrivateIps.add(privateIpKey);
+        if (duplicatePrivateIp && strategy == DuplicateStrategy.SKIP) {
             throw new BadRequestException("文件内存在重复内网 IP：" + asset.getPrivateIp());
         }
-        if (publicIpKey != null && !seenPublicIps.add(publicIpKey)) {
+        boolean duplicatePublicIp = publicIpKey != null && !seenPublicIps.add(publicIpKey);
+        if (duplicatePublicIp && strategy == DuplicateStrategy.SKIP) {
             throw new BadRequestException("文件内存在重复外网 IP：" + asset.getPublicIp());
         }
-        if (assets.existsByNameIgnoreCaseAndProjectId(asset.getName(), asset.getProject().getId())) {
+        Asset existingByName = assets.findByNameIgnoreCaseAndProjectId(asset.getName(), asset.getProject().getId()).orElse(null);
+        Asset existingByPrivateIp = asset.getPrivateIp() == null ? null : assets.findByPrivateIpIgnoreCase(asset.getPrivateIp()).orElse(null);
+        Asset existingByPublicIp = asset.getPublicIp() == null ? null : assets.findByPublicIpIgnoreCase(asset.getPublicIp()).orElse(null);
+        if (strategy == DuplicateStrategy.MERGE && (existingByName != null || existingByPrivateIp != null || existingByPublicIp != null)) {
+            Set<Long> matches = new HashSet<>();
+            if (existingByName != null) matches.add(existingByName.getId());
+            if (existingByPrivateIp != null) matches.add(existingByPrivateIp.getId());
+            if (existingByPublicIp != null) matches.add(existingByPublicIp.getId());
+            if (matches.size() > 1) throw new BadRequestException("名称、内网 IP 和外网 IP 分别匹配到不同资产，无法安全合并");
+            Asset existing = existingByName != null ? existingByName : existingByPrivateIp != null ? existingByPrivateIp : existingByPublicIp;
+            mergeNonEmpty(asset, existing, body);
+            return assets.save(existing);
+        }
+        if (existingByName != null) {
             throw new BadRequestException("数据库中已存在同一项目资产：" + asset.getName());
         }
-        if (privateIpKey != null && assets.existsByPrivateIpIgnoreCase(asset.getPrivateIp())) {
+        if (existingByPrivateIp != null) {
             throw new BadRequestException("数据库中已存在内网 IP：" + asset.getPrivateIp());
         }
-        if (publicIpKey != null && assets.existsByPublicIpIgnoreCase(asset.getPublicIp())) {
+        if (existingByPublicIp != null) {
             throw new BadRequestException("数据库中已存在外网 IP：" + asset.getPublicIp());
         }
         try {
@@ -523,6 +705,18 @@ public class AssetController {
             if (publicIpKey != null) seenPublicIps.remove(publicIpKey);
             throw exception;
         }
+    }
+
+    private void mergeNonEmpty(Asset incoming, Asset existing, Map<String, Object> body) {
+        if (text(body, "assetType") != null) existing.setAssetType(incoming.getAssetType());
+        if (text(body, "environment") != null) existing.setEnvironment(incoming.getEnvironment());
+        if (text(body, "privateIp") != null) existing.setPrivateIp(incoming.getPrivateIp());
+        if (text(body, "publicIp") != null) existing.setPublicIp(incoming.getPublicIp());
+        if (text(body, "hostname") != null) existing.setHostname(incoming.getHostname());
+        if (text(body, "region") != null) existing.setRegion(incoming.getRegion());
+        if (text(body, "description") != null) existing.setDescription(incoming.getDescription());
+        if (text(body, "status") != null) existing.setStatus(incoming.getStatus());
+        if (text(body, "lifecycleState") != null) existing.setLifecycleState(incoming.getLifecycleState());
     }
 
     private String normalizeKey(String value) {
@@ -562,7 +756,11 @@ public class AssetController {
     private String rowData(Row row, DataFormatter formatter) {
         List<String> values = new ArrayList<>();
         for (int i = 0; i < 10; i++) values.add(cell(row, i, formatter));
-        return String.join(",", values);
+        try {
+            StringWriter writer = new StringWriter();
+            try (CSVPrinter printer = new CSVPrinter(writer, CSVFormat.DEFAULT)) { printer.printRecord(values); }
+            return writer.toString().trim();
+        } catch (IOException ex) { return String.join(",", values); }
     }
 
     private boolean isBlank(Row row, DataFormatter formatter) {
@@ -720,6 +918,7 @@ public class AssetController {
         result.put("publicIp", asset.getPublicIp());
         result.put("hostname", asset.getHostname());
         result.put("status", asset.getStatus());
+        result.put("lifecycleState", asset.getLifecycleState());
         result.put("region", asset.getRegion());
         result.put("description", asset.getDescription());
         result.put("projectName", asset.getProject() == null ? null : asset.getProject().getName());
@@ -751,6 +950,7 @@ public class AssetController {
         result.put("publicIp", asset.getPublicIp());
         result.put("hostname", asset.getHostname());
         result.put("status", asset.getStatus());
+        result.put("lifecycleState", asset.getLifecycleState());
         result.put("region", asset.getRegion());
         result.put("description", asset.getDescription());
         result.put("projectId", asset.getProject() == null ? null : asset.getProject().getId());

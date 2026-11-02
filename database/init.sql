@@ -6,8 +6,10 @@
 --   1. Core CMDB tables
 --   2. Asset type dictionary
 --   3. Continent/country/city region dictionary
---   4. Asset change, import and operation audit tables
---   5. Optional demo project and assets
+--   4. Asset relation and lifecycle history tables
+--   5. Asset change, import and operation audit tables
+--   6. Idempotent upgrades for password expiry, lifecycle and audit archive fields
+--   7. Optional demo project and assets
 --
 -- Demo data is disabled by default. To enable it in the same SQL session:
 -- SET @CMDB_LOAD_SAMPLE_DATA = 1;
@@ -144,6 +146,7 @@ CREATE TABLE IF NOT EXISTS `cmdb_asset` (
   `public_ip` VARCHAR(45) NULL,
   `hostname` VARCHAR(100) NULL,
   `status` VARCHAR(30) NOT NULL DEFAULT 'ONLINE',
+  `lifecycle_state` VARCHAR(30) NOT NULL DEFAULT 'IN_SERVICE',
   `region` VARCHAR(100) NULL,
   `description` VARCHAR(500) NULL,
   `project_id` BIGINT NOT NULL,
@@ -161,6 +164,44 @@ CREATE TABLE IF NOT EXISTS `cmdb_asset` (
     FOREIGN KEY (`project_id`) REFERENCES `cmdb_project` (`id`)
     ON UPDATE CASCADE
     ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @cmdb_asset_lifecycle_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_asset' AND COLUMN_NAME = 'lifecycle_state'
+);
+SET @cmdb_asset_lifecycle_sql = IF(@cmdb_asset_lifecycle_exists = 0,
+  'ALTER TABLE `cmdb_asset` ADD COLUMN `lifecycle_state` VARCHAR(30) NOT NULL DEFAULT ''IN_SERVICE'' AFTER `status`', 'SELECT 1');
+PREPARE cmdb_asset_lifecycle_stmt FROM @cmdb_asset_lifecycle_sql;
+EXECUTE cmdb_asset_lifecycle_stmt;
+DEALLOCATE PREPARE cmdb_asset_lifecycle_stmt;
+
+CREATE TABLE IF NOT EXISTS `cmdb_asset_relation` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `source_asset_id` BIGINT NOT NULL,
+  `target_asset_id` BIGINT NOT NULL,
+  `relation_type` VARCHAR(30) NOT NULL,
+  `description` VARCHAR(500) NULL,
+  `created_by` VARCHAR(50) NULL,
+  `created_at` DATETIME(6) NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_cmdb_asset_relation` (`source_asset_id`, `target_asset_id`, `relation_type`),
+  KEY `idx_cmdb_asset_relation_target` (`target_asset_id`),
+  CONSTRAINT `fk_cmdb_asset_relation_source` FOREIGN KEY (`source_asset_id`) REFERENCES `cmdb_asset` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_cmdb_asset_relation_target` FOREIGN KEY (`target_asset_id`) REFERENCES `cmdb_asset` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `cmdb_asset_lifecycle_change` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `asset_id` BIGINT NOT NULL,
+  `asset_name` VARCHAR(100) NOT NULL,
+  `from_state` VARCHAR(30) NOT NULL,
+  `to_state` VARCHAR(30) NOT NULL,
+  `reason` VARCHAR(500) NULL,
+  `operator` VARCHAR(50) NULL,
+  `created_at` DATETIME(6) NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_asset_lifecycle_asset_time` (`asset_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `cmdb_asset_change` (
@@ -219,12 +260,45 @@ CREATE TABLE IF NOT EXISTS `cmdb_operation_audit` (
   `result` VARCHAR(30) NOT NULL,
   `message` VARCHAR(1000) NULL,
   `client_ip` VARCHAR(64) NULL,
+  `archived` TINYINT(1) NOT NULL DEFAULT 0,
+  `archived_at` DATETIME(6) NULL,
   `created_at` DATETIME(6) NULL,
   PRIMARY KEY (`id`),
   KEY `idx_operation_audit_time` (`created_at`),
   KEY `idx_operation_audit_resource` (`resource_type`, `resource_id`),
-  KEY `idx_operation_audit_operator` (`operator`, `created_at`)
+  KEY `idx_operation_audit_operator` (`operator`, `created_at`),
+  KEY `idx_operation_audit_archived_time` (`archived`, `created_at`, `id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @cmdb_audit_archived_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_operation_audit' AND COLUMN_NAME = 'archived'
+);
+SET @cmdb_audit_archived_sql = IF(@cmdb_audit_archived_exists = 0,
+  'ALTER TABLE `cmdb_operation_audit` ADD COLUMN `archived` TINYINT(1) NOT NULL DEFAULT 0', 'SELECT 1');
+PREPARE cmdb_audit_archived_stmt FROM @cmdb_audit_archived_sql;
+EXECUTE cmdb_audit_archived_stmt;
+DEALLOCATE PREPARE cmdb_audit_archived_stmt;
+
+SET @cmdb_audit_archived_at_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_operation_audit' AND COLUMN_NAME = 'archived_at'
+);
+SET @cmdb_audit_archived_at_sql = IF(@cmdb_audit_archived_at_exists = 0,
+  'ALTER TABLE `cmdb_operation_audit` ADD COLUMN `archived_at` DATETIME(6) NULL', 'SELECT 1');
+PREPARE cmdb_audit_archived_at_stmt FROM @cmdb_audit_archived_at_sql;
+EXECUTE cmdb_audit_archived_at_stmt;
+DEALLOCATE PREPARE cmdb_audit_archived_at_stmt;
+
+SET @cmdb_audit_archived_index_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_operation_audit' AND INDEX_NAME = 'idx_operation_audit_archived_time'
+);
+SET @cmdb_audit_archived_index_sql = IF(@cmdb_audit_archived_index_exists = 0,
+  'ALTER TABLE `cmdb_operation_audit` ADD KEY `idx_operation_audit_archived_time` (`archived`, `created_at`, `id`)', 'SELECT 1');
+PREPARE cmdb_audit_archived_index_stmt FROM @cmdb_audit_archived_index_sql;
+EXECUTE cmdb_audit_archived_index_stmt;
+DEALLOCATE PREPARE cmdb_audit_archived_index_stmt;
 
 -- Optional sample project and assets. Disabled unless explicitly enabled.
 INSERT INTO `cmdb_project` (`name`, `code`, `owner`, `description`)
@@ -269,7 +343,20 @@ SELECT
   (SELECT COUNT(*) FROM `cmdb_asset`) AS asset_count,
   (SELECT COUNT(*) FROM `cmdb_asset_type` WHERE `enabled` = 1) AS asset_type_count,
   (SELECT COUNT(*) FROM `cmdb_region` WHERE `enabled` = 1) AS region_count,
+  (SELECT COUNT(*) FROM `cmdb_asset_relation`) AS asset_relation_count,
+  (SELECT COUNT(*) FROM `cmdb_asset_lifecycle_change`) AS lifecycle_change_count,
   (SELECT COUNT(*) FROM `cmdb_asset_change`) AS asset_change_count,
   (SELECT COUNT(*) FROM `cmdb_import_audit`) AS import_audit_count,
   (SELECT COUNT(*) FROM `cmdb_import_failure`) AS import_failure_count,
-  (SELECT COUNT(*) FROM `cmdb_operation_audit`) AS operation_audit_count;
+  (SELECT COUNT(*) FROM `cmdb_operation_audit`) AS operation_audit_count,
+  (SELECT COUNT(*) FROM `cmdb_operation_audit` WHERE `archived` = 1) AS archived_audit_count;
+
+SELECT
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sys_user' AND COLUMN_NAME = 'password_changed_at') AS has_password_changed_at,
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_asset' AND COLUMN_NAME = 'lifecycle_state') AS has_lifecycle_state,
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_operation_audit' AND COLUMN_NAME = 'archived') AS has_audit_archived,
+  (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_operation_audit' AND COLUMN_NAME = 'archived_at') AS has_audit_archived_at;

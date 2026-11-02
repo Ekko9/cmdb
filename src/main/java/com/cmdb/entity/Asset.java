@@ -18,6 +18,7 @@ public class Asset {
     @Column(length = 45) private String publicIp;
     @Column(length = 100) private String hostname;
     @Column(length = 30) private String status = "ONLINE";
+    @Column(name = "lifecycle_state", nullable = false, length = 30) private String lifecycleState = "IN_SERVICE";
     @Column(length = 100) private String region;
     @Column(length = 500) private String description;
     @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "project_id") private Project project;

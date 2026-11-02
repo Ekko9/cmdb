@@ -26,4 +26,8 @@ public interface AssetRepository extends JpaRepository<Asset, Long>, JpaSpecific
     boolean existsByNameIgnoreCaseAndProjectId(String name, Long projectId);
     boolean existsByPrivateIpIgnoreCase(String privateIp);
     boolean existsByPublicIpIgnoreCase(String publicIp);
+
+    java.util.Optional<Asset> findByNameIgnoreCaseAndProjectId(String name, Long projectId);
+    java.util.Optional<Asset> findByPrivateIpIgnoreCase(String privateIp);
+    java.util.Optional<Asset> findByPublicIpIgnoreCase(String publicIp);
 }

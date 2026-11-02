@@ -9,13 +9,16 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 ### 1.1 登录与权限
 
 - 用户名密码登录。
+- 支持公开提交注册申请；新账号固定为停用的 `VIEWER`，需管理员审核启用。
 - 使用 HMAC-SHA256 签名令牌访问受保护接口。
 - 令牌默认有效期为 12 小时。
+- 密码至少包含大小写字母、数字和特殊符号，最长有效期 3 个月；到期前 14 天提醒，到期后仅允许先修改密码。
+- 用户可修改自己的密码；不提供自助找回密码，忘记密码由管理员重置。
 - 支持三种角色：
   - `ADMIN`：管理员，可管理用户、项目和资产。
   - `OPERATOR`：运维人员，可新增、编辑、删除和导入项目/资产，不能管理用户。
   - `VIEWER`：只读用户，只能查看、导出和下载模板。
-- 用户可以启用或停用，停用用户无法登录。
+- 用户可以启用或停用，停用用户无法登录；管理员可重置用户密码。
 
 后端拦截器会按角色校验 `/api/users`、`/api/projects` 和 `/api/assets` 请求；前端按钮隐藏仅用于改善操作体验，不能替代服务端授权。
 
@@ -28,13 +31,21 @@ Orbit CMDB 是一个轻量级的配置管理数据库（Configuration Management
 
 ### 1.3 资产清单
 
-- 新建、编辑和删除资产。
+- 新建、编辑、单项删除和当前页批量删除资产。
 - 支持资产类型、环境、状态、区域、内网 IP、外网 IP、主机名和描述；区域维护为洲、国家/地区、城市/区域三级字典下拉。
-- 支持按内网 IP、外网 IP 和项目筛选资产。
-- 支持 CSV 和 Excel（`.xlsx`）批量导入。
+- 支持分页、排序，以及按 IP、项目等条件筛选资产。
+- 运行状态与生命周期分开管理；生命周期支持规划中、在用、退役中和已退役，并保留流转历史。
+- 支持项目内资产关系和拓扑查看。
+- 支持 CSV 和 Excel（`.xlsx`）批量导入、导入前预校验、重复资产跳过/合并，以及失败行在线修正重试。
 - 支持 CSV 和 Excel（`.xlsx`）导出。
 
-### 1.4 总览仪表盘
+### 1.4 审计与追踪
+
+- 记录资产字段变更、生命周期流转和导入结果。
+- 操作审计支持操作人、动作、资源类型、结果、关键字和时间范围筛选。
+- 操作审计支持 CSV 导出，并可将历史记录标记归档后继续查询。
+
+### 1.5 总览仪表盘
 
 当前总览页面展示：
 
@@ -72,8 +83,8 @@ cmdb/
 │  └─ main/
 │     ├─ java/com/cmdb/
 │     │  ├─ config/               # 认证、异常处理、初始化和 Web 配置
-│     │  ├─ controller/           # 登录、总览、项目、资产和用户接口
-│     │  ├─ entity/               # User、Project、Asset 和资产类型实体
+│     │  ├─ controller/           # 认证、总览、项目、资产、拓扑、生命周期、审计和用户接口
+│     │  ├─ entity/               # 用户、项目、资产、关系、生命周期和审计实体
 │     │  └─ repo/                 # JPA Repository
 │     └─ resources/
 │        ├─ application.yaml      # 服务、数据库和认证配置
@@ -130,11 +141,13 @@ source D:/workspace/cmdb/database/init.sql;
 5. 创建 `cmdb_asset_type` 资产类型选项表并写入默认类型。
 6. 创建 `cmdb_region` 区域字典表，并写入洲、国家/地区、城市/区域字典。
 7. 创建项目与资产之间的外键关系。
-8. 创建常用查询索引。
+8. 创建资产关系表和生命周期流转历史表。
 9. 创建资产变更记录、导入审计、导入失败明细和操作审计日志表。
-10. 预置可重复执行的样例数据语句，默认不插入样例数据。
+10. 为已有数据库幂等补齐密码修改时间、生命周期、审计归档字段和相关索引。
+11. 创建常用查询索引。
+12. 预置可重复执行的样例数据语句，默认不插入样例数据。
 
-脚本使用 `CREATE DATABASE IF NOT EXISTS` 和 `CREATE TABLE IF NOT EXISTS`，重复执行不会重复创建已有对象。
+脚本使用 `CREATE DATABASE IF NOT EXISTS`、`CREATE TABLE IF NOT EXISTS` 和 `INFORMATION_SCHEMA` 条件升级语句；正常情况下可重复执行，不会删除资产或覆盖业务数据。若旧库存在重复的非空项目编码，新增项目编码唯一索引前必须先合并或修正重复编码。
 
 ### 5.2 表关系
 
@@ -144,6 +157,8 @@ cmdb_project   项目空间
 cmdb_asset     资产，必须关联一个项目
 cmdb_asset_type 资产类型下拉选项
 cmdb_region      洲、国家/地区、城市/区域三级字典
+cmdb_asset_relation 项目内资产关系
+cmdb_asset_lifecycle_change 生命周期流转历史
 cmdb_asset_change 资产变更记录
 cmdb_import_audit 导入审计主表
 cmdb_import_failure 导入失败行明细
@@ -151,6 +166,8 @@ cmdb_operation_audit 操作审计日志
 
 cmdb_project 1 ─── N cmdb_asset
 cmdb_asset_type 1 ─── N cmdb_asset（通过类型编码使用）
+cmdb_asset 1 ─── N cmdb_asset_relation（分别作为关系源和目标）
+cmdb_asset 1 ─── N cmdb_asset_lifecycle_change（通过 asset_id 保留历史快照）
 cmdb_import_audit 1 ─── N cmdb_import_failure
 ```
 
@@ -183,7 +200,7 @@ SET @CMDB_LOAD_SAMPLE_DATA = 1;
 source D:/workspace/cmdb/database/init.sql;
 ```
 
-已有数据库也可以重复执行 `init.sql` 补齐缺失的表和字典数据；脚本不会删除资产和业务数据。当前项目只保留这一份手工数据库脚本，后续表结构调整也需要同步更新 `init.sql`。
+已有数据库也可以重复执行 `init.sql` 补齐缺失的表、字段、索引和字典数据；脚本不会删除资产和业务数据。升级会为已有账号补充 `password_changed_at`，但不会修改密码哈希；生命周期、资产关系和审计归档结构也由同一脚本补齐。当前项目只保留这一份手工数据库脚本，后续表结构调整也必须同步更新 `init.sql`。
 
 区域字典按洲、国家/地区、城市/区域保存。项目内置常用国家、首都、主要城市和云服务区域；城市数量没有统一的“全部”边界，业务自定义城市可以继续向 `cmdb_region` 追加，`enabled=1` 后会自动出现在资产表单下拉中。
 
@@ -516,6 +533,12 @@ Invoke-RestMethod -Uri 'http://localhost:8080/actuator/health/readiness'
 
 资产清单支持服务端分页、排序和多条件筛选。点击资产名称可以打开资产详情页，详情页展示资产基础信息和最近 100 条变更记录。
 
+管理员和运维人员可以勾选资产清单当前页的多项资产并批量删除；每次最多 100 项。翻页或重新筛选会清空所选项，删除前会要求二次确认，删除结果逐项写入资产变更记录和操作审计。
+
+资产运行状态（在线、离线、维护中）与生命周期状态独立。生命周期依次支持规划中、在用、退役中、已退役；只允许规划中→在用/已退役、在用→退役中、退役中→在用/已退役。每次流转需由有写入权限的用户执行，可填写原因，并永久保留操作人和时间。资产详情可查看生命周期记录。
+
+“资产拓扑”按项目显示节点及其关系。关系类型包括依赖、运行于、连接、包含和备份自；目前仅允许同一项目内关联，不允许资产关联自身或添加相同关系。删除资产时关系随资产一并删除，拓扑查询不会跨项目扩展。
+
 ### 9.4 用户权限
 
 管理员登录后可以进入“用户权限”页面：
@@ -544,8 +567,12 @@ Invoke-RestMethod -Uri 'http://localhost:8080/actuator/health/readiness'
 | 导出资产、下载模板 | 允许 | 允许 | 允许 |
 | 新增、编辑、删除项目和资产 | 允许 | 允许 | 禁止 |
 | 导入资产 | 允许 | 允许 | 禁止 |
+| 预校验/合并导入/失败行修正 | 允许 | 允许 | 禁止 |
+| 查看资产关系拓扑 | 允许 | 允许 | 允许 |
+| 创建资产关系和生命周期流转 | 允许 | 允许 | 禁止 |
 | 查看导入审计和下载失败行 | 允许 | 允许 | 禁止 |
 | 查看操作审计日志 | 允许 | 禁止 | 禁止 |
+| 导出、归档操作审计 | 允许 | 禁止 | 禁止 |
 | 查看、新增、编辑、删除用户 | 允许 | 禁止 | 禁止 |
 
 ## 10. 资产导入导出
@@ -606,6 +633,8 @@ web-01,SERVER,PRODUCTION,10.0.0.10,203.0.113.10,web-01,默认项目,ONLINE,亚�
 - 每次导入都会写入导入审计记录。
 - 导入失败行会保存行号、失败原因和原始数据，可在“导入审计”页面下载 CSV。
 - 导入不会自动更新已有资产；同一项目下资产名称重复、内网 IP 重复、外网 IP 重复，以及同一文件内的重复行都会被拒绝，并记录到失败行明细。
+- 导入文件可先执行预校验；预校验仅读取文件和数据库，不创建导入审计或变更资产。默认重复策略为“跳过”。显式选择“合并”时按同项目资产名称、内网 IP 或外网 IP 定位；若这些标识各自匹配到不同资产则拒绝合并。合并只覆盖文件中非空的字段，未提供字段保持原值。
+- 导入审计中的失败行可在线修正并重试。成功后失败行移除、成功/失败计数与导入状态同步更新；重试采用合并策略，避免修正重复行时误建重复资产。
 - CSV 和 XLSX 单次最多导入 10,000 行；超过限制时整个请求会回滚。上传文件大小限制仍为 10MB。
 - 导出最多返回 10,000 条资产；需要更多数据时请先筛选或分批导出。
 - CSV 导出和失败行 CSV 会对公式起始字符进行转义，避免表格软件打开时将单元格内容当作公式执行。
@@ -675,7 +704,9 @@ Authorization: Bearer <token>
 | `POST` | `/api/assets` | 新建资产 |
 | `PUT` | `/api/assets/{id}` | 编辑资产 |
 | `DELETE` | `/api/assets/{id}` | 删除资产 |
-| `POST` | `/api/assets/import` | 上传 CSV 或 Excel 批量导入，字段名为 `file` |
+| `DELETE` | `/api/assets/batch` | 批量删除资产，JSON 数组传入 1 至 100 个资产 ID |
+| `POST` | `/api/assets/import` | 上传 CSV 或 Excel 批量导入，字段名为 `file`；可选 `duplicateStrategy=SKIP/MERGE` |
+| `POST` | `/api/assets/import/validate` | 预校验 CSV/Excel，不写入资产；可选 `duplicateStrategy=SKIP/MERGE` |
 | `GET` | `/api/assets/export` | 导出 CSV，可选 `projectId`、`keyword` |
 | `GET` | `/api/assets/export.xlsx` | 导出 Excel，可选 `projectId`、`keyword` |
 | `GET` | `/api/assets/template.xlsx` | 下载带下拉选项和样例的 Excel 模板 |
@@ -683,6 +714,13 @@ Authorization: Bearer <token>
 | `GET` | `/api/assets/regions` | 查询启用的洲、国家/地区、城市/区域字典 |
 | `GET` | `/api/assets/imports` | 查询导入审计记录 |
 | `GET` | `/api/assets/imports/{id}/failures.csv` | 下载某次导入的失败行 CSV |
+| `GET` | `/api/assets/imports/{id}/failures` | 查询可在线修正的失败行 |
+| `PUT` | `/api/assets/imports/{importId}/failures/{failureId}/retry` | 修正并重试失败行 |
+| `GET` | `/api/assets/topology?projectId={id}` | 查询项目资产节点和关系边 |
+| `POST` | `/api/assets/{id}/relations` | 创建同项目资产关系 |
+| `DELETE` | `/api/assets/{id}/relations/{relationId}` | 删除源资产关系 |
+| `PUT` | `/api/assets/{id}/lifecycle` | 执行受限生命周期流转，参数为 `state` 和可选 `reason` |
+| `GET` | `/api/assets/{id}/lifecycle/history` | 查询生命周期流转记录 |
 
 ### 11.5 用户
 
@@ -697,7 +735,9 @@ Authorization: Bearer <token>
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/audits` | 查询操作审计日志，仅管理员可访问 |
+| `GET` | `/api/audits` | 查询操作审计日志；支持 `operator`、`action`、`resourceType`、`result`、`keyword`、`from`、`to`、`archived` 筛选，仅管理员可访问 |
+| `GET` | `/api/audits/export` | 导出当前相同筛选条件的 CSV，最多 10,000 条 |
+| `POST` | `/api/audits/archive?before={ISO日期时间}` | 将截止时间以前未归档日志按每批 500 条标记归档，可安全重复调用 |
 
 ## 12. Docker 运行
 
@@ -899,7 +939,9 @@ database/init.sql
 
 ## 15. 当前验证状态
 
-最近一次线上发布（2026-11-02，管理员与项目数据约束修复）：JDK 17 下 `mvn clean package` 成功，16 项测试全部通过；`node --check src/main/resources/static/app.js` 与 `git diff --check` 通过。JAR SHA-256 为 `37F2FBC3041CEFE1416BC91132809B4A841FC3EA853B110B57EA8BC5CE140AB8`，已部署到 `192.168.11.218:/opt/fusx/cmdb`。部署后 PID `7553`、readiness `UP`、首页 HTTP 200；静态脚本缓存版本已更新。此前发布备份为 `cmdb.jar.backup-20261102-admin-project-hardening`；本次回滚备份为 `cmdb.jar.backup-20261102-pre-delete-guard`。生产库已补建 `uk_cmdb_project_code`；部署仅更新裸机 JAR，未更新 Docker 镜像/K8S 工作负载。
+最近一次已确认的线上发布为 2026-11-02：裸机 JAR 已部署到 `192.168.11.218:/opt/fusx/cmdb`，服务端口为 `9090`，部署后 readiness 为 `UP`、首页 HTTP 200。生产库已补建项目编码唯一索引以及密码有效期、生命周期和审计归档所需结构。线上发布仅更新裸机 JAR，未更新 Docker 镜像或 K8S 工作负载。具体 PID、JAR 哈希和备份文件名会随每次发布变化，应以部署当次输出为准。
+
+当前源码已包含资产关系拓扑、生命周期流转、导入预校验与重复合并、失败行在线修正、资产批量删除、审计高级筛选/导出/归档，以及统一导航页签样式。2026-11-02 提交前已执行 `node --check src/main/resources/static/app.js`、`git diff --check` 和 JDK 17 下的 `mvn -o clean package`，23 项测试全部通过并成功生成 `target/cmdb-1.0.0.jar`。
 
 此前已完成以下功能验证：
 
@@ -915,10 +957,11 @@ database/init.sql
 
 当前仍建议继续补充：
 
-- 资产、项目和用户删除流程的自动化测试。
+- 资产单项删除、项目和用户删除流程的自动化测试。
 - CSV/Excel 导入成功、失败和重复数据场景的自动化测试。
 - 角色权限隔离的自动化测试。
-- 数据库初始化和生产部署测试。
+- `database/init.sql` 在全新 MySQL 与历史库升级两种路径下的自动化测试。
+- Docker Compose 和 Kubernetes 清单在目标环境的实际部署验证。
 
 ## 16. 生产部署建议
 
@@ -937,7 +980,4 @@ database/init.sql
 
 ## 17. 后续迭代方向
 
-- 更丰富的资产关系拓扑和生命周期状态流转。
-- 导入预校验、重复资产合并策略和失败行在线修正。
-- 审计日志高级筛选、导出和长期归档。
 - 指标告警规则、日志采集面板和容量趋势分析。

@@ -61,6 +61,7 @@ const appTemplate = `
       <nav class="nav">
         <button type="button" :class="{active:tab==='overview'}" @click="go('overview')">总览</button>
         <button type="button" :class="{active:tab==='assets'}" @click="go('assets')">资产清单</button>
+        <button type="button" :class="{active:tab==='topology'}" @click="go('topology')">资产拓扑</button>
         <button type="button" :class="{active:tab==='projects'}" @click="go('projects')">项目空间</button>
         <button v-if="canWrite" type="button" :class="{active:tab==='imports'}" @click="go('imports')">导入审计</button>
         <button v-if="canManageUsers" type="button" :class="{active:tab==='audits'}" @click="go('audits')">操作审计</button>
@@ -127,38 +128,77 @@ const appTemplate = `
               <button class="ghost" type="button" @click="downloadTemplate">下载 Excel 模板</button>
               <button class="ghost" type="button" @click="downloadCsv">导出 CSV</button>
               <button class="ghost" type="button" @click="downloadExcel">导出 Excel</button>
-              <label v-if="canWrite" class="ghost file-btn">导入 CSV / Excel<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="importFile"></label>
+              <select v-if="canWrite" v-model="duplicateStrategy" title="导入重复资产处理策略"><option value="SKIP">重复时跳过</option><option value="MERGE">重复时合并非空字段</option></select>
+              <button v-if="canWrite" class="ghost" type="button" @click="selectImportFile">导入 CSV / Excel</button>
               <button v-if="canWrite" class="primary" type="button" @click="open('asset')" :disabled="!projects.length">+ 新建资产</button>
             </div>
           </div>
         </div>
+        <div v-if="canWrite" class="selection-toolbar"><span>已选择 {{ selectedAssetIds.length }} 项</span><button class="ghost" type="button" @click="togglePageSelection(!allVisibleAssetsSelected)">{{ allVisibleAssetsSelected ? '取消全选' : '选择本页' }}</button><button class="ghost danger" type="button" @click="deleteSelectedAssets" :disabled="!selectedAssetIds.length">批量删除</button></div>
         <div class="table-wrap">
           <table class="table">
-            <thead><tr><th @click="setSort('name')">资产名称</th><th @click="setSort('assetType')">资产类型</th><th>项目</th><th @click="setSort('environment')">环境</th><th>内网 IP</th><th>外网 IP</th><th>区域</th><th @click="setSort('status')">状态</th><th v-if="canWrite">操作</th></tr></thead>
+            <thead><tr><th v-if="canWrite"><input type="checkbox" aria-label="选择当前页资产" :checked="allVisibleAssetsSelected" @change="togglePageSelection"></th><th @click="setSort('name')">资产名称</th><th @click="setSort('assetType')">资产类型</th><th>项目</th><th @click="setSort('environment')">环境</th><th>内网 IP</th><th>外网 IP</th><th>区域</th><th @click="setSort('status')">运行状态</th><th>生命周期</th><th v-if="canWrite">操作</th></tr></thead>
             <tbody>
               <tr v-for="asset in assets" :key="asset.id">
+                <td v-if="canWrite"><input type="checkbox" :aria-label="'选择资产 '+asset.name" :checked="selectedAssetIds.includes(asset.id)" @change="toggleAssetSelection(asset.id)"></td>
                 <td><button class="link-btn" type="button" @click="openDetail(asset.id)"><b>{{ asset.name }}</b></button><small class="sub-cell">{{ asset.hostname || '' }}</small></td>
                 <td>{{ assetTypeLabel(asset.assetType) }}</td><td>{{ asset.projectName }}</td><td>{{ environmentLabel(asset.environment) }}</td>
                 <td>{{ asset.privateIp || '-' }}</td><td>{{ asset.publicIp || '-' }}</td><td>{{ asset.region || '-' }}</td>
-                <td><span :class="['pill', statusClass(asset.status)]">{{ statusLabel(asset.status) }}</span></td>
+                <td><span :class="['pill', statusClass(asset.status)]">{{ statusLabel(asset.status) }}</span></td><td>{{ lifecycleLabel(asset.lifecycleState) }}</td>
                 <td v-if="canWrite" class="actions"><button class="ghost action-edit" type="button" @click="open('asset', asset)">编辑</button><button class="ghost danger action-delete" type="button" @click="remove('assets', asset.id, asset.name)">删除</button></td>
               </tr>
-              <tr v-if="!assets.length"><td colspan="9" class="empty">没有匹配的资产</td></tr>
+              <tr v-if="!assets.length"><td :colspan="canWrite ? 11 : 10" class="empty">没有匹配的资产</td></tr>
             </tbody>
           </table>
         </div>
         <div class="pager"><button class="ghost" type="button" @click="prevAssetPage" :disabled="assetPage.page<=0">上一页</button><span>第 {{ assetPage.page + 1 }} / {{ Math.max(assetPage.totalPages, 1) }} 页，共 {{ assetPage.totalElements }} 条</span><button class="ghost" type="button" @click="nextAssetPage" :disabled="assetPage.page + 1 >= assetPage.totalPages">下一页</button><select v-model.number="assetPage.size" @change="loadAssets"><option :value="10">10 条</option><option :value="20">20 条</option><option :value="50">50 条</option></select></div>
       </section>
 
+      <section v-if="tab==='topology' && !loading" class="panel">
+        <div class="section-head"><h3>项目资产拓扑</h3><div class="toolbar"><select v-model="topologyProjectId" @change="loadTopology"><option value="">选择项目</option><option v-for="project in projects" :value="String(project.id)" :key="project.id">{{ project.name }}</option></select><button class="ghost" type="button" @click="loadTopology" :disabled="!topologyProjectId">刷新</button></div></div>
+        <div v-if="canWrite && topologyProjectId" class="form-grid">
+          <div class="field"><label>源资产</label><select v-model="relationDraft.sourceId"><option v-for="asset in topology.nodes" :value="asset.id" :key="asset.id">{{ asset.name }}</option></select></div>
+          <div class="field"><label>目标资产</label><select v-model="relationDraft.targetId"><option v-for="asset in topology.nodes" :value="asset.id" :key="asset.id">{{ asset.name }}</option></select></div>
+          <div class="field"><label>关系类型</label><select v-model="relationDraft.type"><option value="DEPENDS_ON">依赖</option><option value="HOSTED_ON">运行于</option><option value="CONNECTS_TO">连接</option><option value="CONTAINS">包含</option><option value="BACKUP_OF">备份自</option></select></div>
+          <div class="field"><label>说明</label><input v-model.trim="relationDraft.description" maxlength="500"></div>
+          <div class="field"><label>&nbsp;</label><button class="primary" type="button" @click="createRelation">添加关系</button></div>
+        </div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>资产</th><th>类型</th><th>运行状态</th><th>生命周期</th><th>内网 IP</th></tr></thead><tbody>
+          <tr v-for="node in topology.nodes" :key="node.id"><td><b>{{ node.name }}</b></td><td>{{ assetTypeLabel(node.assetType) }}</td><td>{{ statusLabel(node.status) }}</td><td>{{ lifecycleLabel(node.lifecycleState) }}</td><td>{{ node.privateIp || '-' }}</td></tr>
+          <tr v-if="!topology.nodes.length"><td colspan="5" class="empty">选择项目查看资产节点</td></tr>
+        </tbody></table></div>
+        <div v-if="topology.nodes.length" class="topology-canvas"><svg :viewBox="'0 0 '+topologyLayout.width+' '+topologyLayout.height" role="img" aria-label="项目资产关系图">
+          <line v-for="edge in topologyLayout.edges" :key="'line-'+edge.id" :x1="edge.x1" :y1="edge.y1" :x2="edge.x2" :y2="edge.y2" class="topology-edge"></line>
+          <text v-for="edge in topologyLayout.edges" :key="'label-'+edge.id" :x="(edge.x1+edge.x2)/2" :y="(edge.y1+edge.y2)/2-8" class="topology-edge-label">{{ relationLabel(edge.type) }}</text>
+          <g v-for="node in topologyLayout.nodes" :key="'node-'+node.id" class="topology-node"><rect :x="node.x" :y="node.y" width="172" height="58" rx="4"></rect><text :x="node.x+12" :y="node.y+23" class="topology-node-name">{{ node.name }}</text><text :x="node.x+12" :y="node.y+43" class="topology-node-meta">{{ assetTypeLabel(node.assetType) }} · {{ lifecycleLabel(node.lifecycleState) }}</text></g>
+        </svg></div>
+        <h4>关系</h4>
+        <div class="table-wrap"><table class="table"><thead><tr><th>源资产</th><th>关系</th><th>目标资产</th><th>说明</th><th v-if="canWrite">操作</th></tr></thead><tbody>
+          <tr v-for="edge in topology.edges" :key="edge.id"><td>{{ nodeName(edge.sourceId) }}</td><td>{{ relationLabel(edge.type) }}</td><td>{{ nodeName(edge.targetId) }}</td><td>{{ edge.description || '-' }}</td><td v-if="canWrite"><button class="ghost danger" type="button" @click="removeRelation(edge)">删除</button></td></tr>
+          <tr v-if="!topology.edges.length"><td :colspan="canWrite ? 5 : 4" class="empty">暂无资产关系</td></tr>
+        </tbody></table></div>
+      </section>
+
       <section v-if="tab==='imports' && canWrite && !loading" class="panel">
-        <div class="section-head"><h3>导入审计</h3><button class="ghost" type="button" @click="loadImports">刷新</button></div>
+        <div class="section-head"><h3>导入审计</h3><div class="toolbar"><button class="primary" type="button" @click="selectImportFile">导入 CSV / Excel</button><button class="ghost" type="button" @click="loadImports">刷新</button></div></div>
+        <div v-if="previewResult" class="notice"><b>预检：共 {{ previewResult.totalRows }} 行，可处理 {{ previewResult.validRows }} 行，失败 {{ previewResult.failedRows }} 行；重复策略 {{ previewResult.duplicateStrategy==='MERGE' ? '合并非空字段' : '跳过' }}。</b>
+          <div v-for="error in previewResult.errors" :key="error.rowNumber">第 {{ error.rowNumber }} 行：{{ error.reason }}</div>
+          <button class="primary" type="button" @click="confirmImport" :disabled="importing || !previewFile">确认导入</button><button class="ghost" type="button" @click="clearImportPreview">取消</button>
+        </div>
         <div class="table-wrap"><table class="table">
           <thead><tr><th>文件名</th><th>类型</th><th>状态</th><th>总行数</th><th>成功</th><th>失败</th><th>操作人</th><th>时间</th><th>失败行</th></tr></thead>
           <tbody>
-            <tr v-for="item in imports" :key="item.id"><td><b>{{ item.filename }}</b></td><td>{{ item.fileType }}</td><td>{{ importStatusLabel(item.status) }}</td><td>{{ item.totalRows }}</td><td>{{ item.successCount }}</td><td>{{ item.failedCount }}</td><td>{{ item.operator || '-' }}</td><td>{{ formatTime(item.createdAt) }}</td><td><button v-if="item.failedCount" class="ghost" type="button" @click="downloadImportFailures(item.id)">下载</button><span v-else>-</span></td></tr>
+            <tr v-for="item in imports" :key="item.id"><td><b>{{ item.filename }}</b></td><td>{{ item.fileType }}</td><td>{{ importStatusLabel(item.status) }}</td><td>{{ item.totalRows }}</td><td>{{ item.successCount }}</td><td>{{ item.failedCount }}</td><td>{{ item.operator || '-' }}</td><td>{{ formatTime(item.createdAt) }}</td><td><button v-if="item.failedCount" class="ghost" type="button" @click="openImportFailures(item)">修正 {{ item.failedCount }} 行</button><button v-if="item.failedCount" class="ghost" type="button" @click="downloadImportFailures(item.id)">下载</button><span v-if="!item.failedCount">-</span></td></tr>
             <tr v-if="!imports.length"><td colspan="9" class="empty">暂无导入记录</td></tr>
           </tbody>
         </table></div>
+        <div v-if="failureImport" class="audit-failures">
+          <div class="section-head"><h3>{{ failureImport.filename }} · 失败行修正</h3><button class="ghost" type="button" @click="failureImport=null">关闭</button></div>
+          <div class="table-wrap"><table class="table"><thead><tr><th>行号</th><th>失败原因</th><th>原始行</th><th>操作</th></tr></thead><tbody>
+            <tr v-for="failure in importFailures" :key="failure.id"><td>{{ failure.rowNumber }}</td><td>{{ failure.reason }}</td><td>{{ failure.rawData }}</td><td><button class="ghost" type="button" @click="editImportFailure(failure)">修正并重试</button></td></tr>
+            <tr v-if="!importFailures.length"><td colspan="4" class="empty">失败行已全部处理</td></tr>
+          </tbody></table></div>
+        </div>
         <div class="pager">
           <button class="ghost" type="button" @click="prevImportPage" :disabled="importPage.page<=0">上一页</button>
           <span>第 {{ importPage.page + 1 }} / {{ Math.max(importPage.totalPages, 1) }} 页，共 {{ importPage.totalElements }} 条</span>
@@ -170,7 +210,17 @@ const appTemplate = `
       </section>
 
       <section v-if="tab==='audits' && canManageUsers && !loading" class="panel">
-        <div class="section-head"><h3>操作审计日志</h3><button class="ghost" type="button" @click="loadAudits">刷新</button></div>
+        <div class="section-head audit-head"><div><h3>操作审计日志</h3><p class="import-hint">按条件筛选、导出或查看历史归档记录。</p></div><div class="audit-actions"><label class="audit-scope"><span>日志范围</span><select v-model="auditFilters.archived" @change="searchAudits"><option :value="false">当前日志</option><option :value="true">已归档日志</option></select></label><button class="ghost" type="button" @click="downloadAudits">导出 CSV</button><button class="ghost" type="button" @click="archiveAudits">归档 1 年前记录</button><button class="ghost" type="button" @click="loadAudits">刷新</button></div></div>
+        <div class="form-grid audit-filter-grid">
+          <div class="field"><label>操作人</label><input v-model.trim="auditFilters.operator"></div>
+          <div class="field"><label>动作</label><select v-model="auditFilters.action"><option value="">全部动作</option><option value="CREATE">新增</option><option value="UPDATE">编辑</option><option value="DELETE">删除</option><option value="IMPORT">导入</option><option value="IMPORT_RETRY">导入失败行重试</option><option value="LIFECYCLE">生命周期流转</option><option value="CREATE_RELATION">创建资产关系</option><option value="DELETE_RELATION">删除资产关系</option><option value="ARCHIVE">审计归档</option><option value="REGISTER">用户注册</option><option value="CHANGE_PASSWORD">修改密码</option></select></div>
+          <div class="field"><label>资源类型</label><select v-model="auditFilters.resourceType"><option value="">全部资源</option><option value="ASSET">资产</option><option value="ASSET_RELATION">资产关系</option><option value="PROJECT">项目</option><option value="USER">用户</option><option value="ACCOUNT">账号</option><option value="AUDIT">审计日志</option></select></div>
+          <div class="field"><label>结果</label><select v-model="auditFilters.result"><option value="">全部结果</option><option value="SUCCESS">成功</option><option value="PARTIAL">部分成功</option><option value="FAILED">失败</option><option value="PENDING">待审核</option></select></div>
+          <div class="field"><label>关键词</label><input v-model.trim="auditFilters.keyword" placeholder="名称、ID、说明或 IP"></div>
+          <div class="field"><label>起始时间</label><input type="datetime-local" v-model="auditFilters.from"></div>
+          <div class="field"><label>结束时间</label><input type="datetime-local" v-model="auditFilters.to"></div>
+          <div class="field"><label>&nbsp;</label><button class="primary" type="button" @click="searchAudits">筛选</button></div>
+        </div>
         <div class="table-wrap"><table class="table">
           <thead><tr><th>时间</th><th>操作人</th><th>角色</th><th>动作</th><th>资源</th><th>结果</th><th>来源 IP</th><th>说明</th></tr></thead>
           <tbody>
@@ -224,7 +274,7 @@ const appTemplate = `
     <div v-if="showModal" class="modal-back" @click.self="!passwordExpired && close()">
       <form class="modal" @submit.prevent="save">
         <div class="section-head">
-          <h3>{{ modalType==='password' ? '修改密码' : (editing ? '编辑' : '新建') + (modalType==='asset' ? '资产' : modalType==='project' ? '项目' : '用户') }}</h3>
+          <h3>{{ modalType==='password' ? '修改密码' : modalType==='importFailure' ? '修正导入失败行' : (editing ? '编辑' : '新建') + (modalType==='asset' ? '资产' : modalType==='project' ? '项目' : '用户') }}</h3>
           <button v-if="!passwordExpired" class="ghost close" type="button" @click="close">×</button>
         </div>
         <div v-if="passwordExpired" class="notice error">密码已超过 3 个月有效期，请先修改密码后继续使用。</div>
@@ -241,6 +291,7 @@ const appTemplate = `
             <div class="field"><label>项目 *</label><select v-model="form.projectId" required><option v-for="project in projects" :value="project.id" :key="project.id">{{ project.name }}</option></select></div>
             <div class="field"><label>环境</label><select v-model="form.environment"><option value="PRODUCTION">生产环境</option><option value="STAGING">预发布环境</option><option value="DEVELOPMENT">开发环境</option></select></div>
             <div class="field"><label>状态</label><select v-model="form.status"><option value="ONLINE">在线</option><option value="OFFLINE">离线</option><option value="MAINTENANCE">维护中</option></select></div>
+            <div v-if="!editing" class="field"><label>初始生命周期</label><select v-model="form.lifecycleState"><option value="PLANNED">规划中</option><option value="IN_SERVICE">在用</option></select></div>
             <div class="field"><label>洲</label><select v-model="regionDraft.continent" @change="onRegionContinentChange"><option value="">请选择</option><option v-for="continent in regionContinents" :value="continent" :key="continent">{{ continent }}</option></select></div>
             <div class="field"><label>国家 / 地区</label><select v-model="regionDraft.country" @change="onRegionCountryChange" :disabled="!regionDraft.continent"><option value="">请选择</option><option v-for="country in regionCountries" :value="country" :key="country">{{ country }}</option></select></div>
             <div class="field"><label>城市 / 区域</label><select v-model="form.region" :disabled="!regionDraft.country"><option value="">请选择</option><option v-if="form.region && !knownRegionValues.includes(form.region)" :value="form.region">{{ form.region }}</option><option v-for="item in regionCities" :value="item.label" :key="item.id">{{ item.region }}</option></select></div>
@@ -248,6 +299,15 @@ const appTemplate = `
             <div class="field"><label>外网 IP</label><input v-model.trim="form.publicIp"></div>
             <div class="field wide"><label>主机名</label><input v-model.trim="form.hostname"></div>
             <div class="field wide"><label>描述</label><textarea v-model.trim="form.description" rows="3"></textarea></div>
+          </template>
+          <template v-else-if="modalType==='importFailure'">
+            <div class="field"><label>资产名称 *</label><input v-model.trim="form.name" required></div>
+            <div class="field"><label>资产类型</label><select v-model="form.assetType"><option value="">请选择</option><option v-for="type in assetTypes" :value="type" :key="type">{{ assetTypeLabel(type) }}</option></select></div>
+            <div class="field"><label>项目 *</label><select v-model="form.projectName" required><option v-for="project in projects" :value="project.name" :key="project.id">{{ project.name }}</option></select></div>
+            <div class="field"><label>环境</label><select v-model="form.environment"><option value="">保持不变</option><option value="PRODUCTION">生产环境</option><option value="STAGING">预发布环境</option><option value="DEVELOPMENT">开发环境</option></select></div>
+            <div class="field"><label>内网 IP</label><input v-model.trim="form.privateIp"></div><div class="field"><label>外网 IP</label><input v-model.trim="form.publicIp"></div>
+            <div class="field"><label>主机名</label><input v-model.trim="form.hostname"></div><div class="field"><label>运行状态</label><select v-model="form.status"><option value="">保持不变</option><option value="ONLINE">在线</option><option value="OFFLINE">离线</option><option value="MAINTENANCE">维护中</option></select></div>
+            <div class="field wide"><label>区域</label><input v-model.trim="form.region"></div><div class="field wide"><label>描述</label><textarea v-model.trim="form.description" rows="3"></textarea></div>
           </template>
           <template v-else-if="modalType==='project'">
             <div class="field"><label>项目名称 *</label><input v-model.trim="form.name" required></div>
@@ -275,12 +335,15 @@ const appTemplate = `
           <div><small>类型</small><b>{{ assetTypeLabel(detailAsset.assetType) }}</b></div>
           <div><small>环境</small><b>{{ environmentLabel(detailAsset.environment) }}</b></div>
           <div><small>状态</small><b>{{ statusLabel(detailAsset.status) }}</b></div>
+          <div><small>生命周期</small><b>{{ lifecycleLabel(detailAsset.lifecycleState) }}</b></div>
           <div><small>内网 IP</small><b>{{ detailAsset.privateIp || '-' }}</b></div>
           <div><small>外网 IP</small><b>{{ detailAsset.publicIp || '-' }}</b></div>
           <div><small>主机名</small><b>{{ detailAsset.hostname || '-' }}</b></div>
           <div><small>区域</small><b>{{ detailAsset.region || '-' }}</b></div>
         </div>
         <p class="detail-desc">{{ detailAsset.description || '暂无描述' }}</p>
+        <div v-if="canWrite" class="toolbar"><select v-model="lifecycleTarget"><option v-for="state in lifecycleOptions(detailAsset.lifecycleState)" :value="state" :key="state">{{ lifecycleLabel(state) }}</option></select><input v-model.trim="lifecycleReason" maxlength="500" placeholder="流转原因"><button class="primary" type="button" @click="changeLifecycle(detailAsset)">流转状态</button></div>
+        <h4>生命周期记录</h4><div class="timeline"><div v-for="item in lifecycleHistory" :key="item.id" class="timeline-item"><b>{{ lifecycleLabel(item.fromState) }} → {{ lifecycleLabel(item.toState) }}</b><span>{{ formatTime(item.createdAt) }} · {{ item.operator || '-' }}</span><small>{{ item.reason || '未填写原因' }}</small></div><div v-if="!lifecycleHistory.length" class="empty">暂无生命周期记录</div></div>
         <h4>变更记录</h4>
         <div class="timeline">
           <div v-for="change in detailAsset.changes || []" :key="change.id" class="timeline-item">
@@ -343,8 +406,12 @@ createApp({
         return {
           tab: 'overview', stats: {}, projects: [], assets: [], users: [], assetTypes: [], regions: [],
           filters: { keyword: '', projectId: '' },
+          selectedAssetIds: [],
           assetPage: { page: 0, size: 10, totalElements: 0, totalPages: 0, sort: 'updatedAt', direction: 'desc' },
-          imports: [], audits: [], detailAsset: null,
+          imports: [], importFailures: [], audits: [], detailAsset: null, lifecycleHistory: [], lifecycleTarget: '', lifecycleReason: '',
+          topologyProjectId: '', topology: { nodes: [], edges: [] }, relationDraft: { sourceId: '', targetId: '', type: 'DEPENDS_ON', description: '' },
+          duplicateStrategy: 'SKIP', previewFile: null, previewResult: null, failureImport: null,
+          auditFilters: { operator: '', action: '', resourceType: '', result: '', keyword: '', from: '', to: '', archived: false },
           importPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
           auditPage: { page: 0, size: 5, totalElements: 0, totalPages: 0 },
           regionDraft: { continent: '', country: '' },
@@ -354,17 +421,25 @@ createApp({
         };
       },
       computed: {
-        title() { return { overview: '资产总览', assets: '资产清单', projects: '项目空间', imports: '导入审计', audits: '操作审计', users: '用户与权限' }[this.tab]; },
+        title() { return { overview: '资产总览', assets: '资产清单', topology: '资产拓扑', projects: '项目空间', imports: '导入审计', audits: '操作审计', users: '用户与权限' }[this.tab]; },
         user() { return this.$root.user || {}; },
         userInitial() { return (this.user.displayName || this.user.username || 'U').substring(0, 1); },
         canManageUsers() { return this.user.role === 'ADMIN'; },
         canWrite() { return this.user.role === 'ADMIN' || this.user.role === 'OPERATOR'; },
+        allVisibleAssetsSelected() { return this.assets.length > 0 && this.assets.every(asset => this.selectedAssetIds.includes(asset.id)); },
         regionContinents() { return [...new Set(this.regions.map(item => item.continent).filter(Boolean))]; },
         regionCountries() {
           return [...new Set(this.regions.filter(item => item.continent === this.regionDraft.continent).map(item => item.country).filter(Boolean))];
         },
         regionCities() {
           return this.regions.filter(item => item.continent === this.regionDraft.continent && item.country === this.regionDraft.country);
+        },
+        topologyLayout() {
+          const columns = 4, cellWidth = 210, cellHeight = 100, width = Math.max(220, Math.min(this.topology.nodes.length, columns) * cellWidth), rows = Math.ceil(this.topology.nodes.length / columns);
+          const nodes = this.topology.nodes.map((node, index) => ({ ...node, x: (index % columns) * cellWidth + 12, y: Math.floor(index / columns) * cellHeight + 12 }));
+          const byId = new Map(nodes.map(node => [node.id, node]));
+          const edges = this.topology.edges.map(edge => { const source = byId.get(edge.sourceId), target = byId.get(edge.targetId); return source && target ? { ...edge, x1: source.x + 86, y1: source.y + 58, x2: target.x + 86, y2: target.y } : null; }).filter(Boolean);
+          return { nodes, edges, width, height: Math.max(90, rows * cellHeight + 20) };
         },
         knownRegionValues() { return this.regions.map(item => item.label); },
       },
@@ -381,8 +456,12 @@ createApp({
         statusLabel(value) { return { ONLINE: '在线', OFFLINE: '离线', MAINTENANCE: '维护中' }[value] || value || '-'; },
         roleLabel(value) { return { ADMIN: '管理员', OPERATOR: '运维人员', VIEWER: '只读用户' }[value] || value || '-'; },
         importStatusLabel(value) { return { SUCCESS: '成功', PARTIAL: '部分成功', FAILED: '失败', RUNNING: '处理中' }[value] || value || '-'; },
-        actionLabel(value) { return { CREATE: '新增', UPDATE: '编辑', DELETE: '删除', IMPORT: '导入', CHANGE_PASSWORD: '修改密码' }[value] || value || '-'; },
-        resourceLabel(value) { return { ASSET: '资产', PROJECT: '项目', USER: '用户', ACCOUNT: '账号' }[value] || value || '-'; },
+        lifecycleLabel(value) { return { PLANNED: '规划中', IN_SERVICE: '在用', RETIRING: '退役中', RETIRED: '已退役' }[value] || value || '-'; },
+        lifecycleOptions(value) { return { PLANNED: ['IN_SERVICE', 'RETIRED'], IN_SERVICE: ['RETIRING'], RETIRING: ['IN_SERVICE', 'RETIRED'], RETIRED: [] }[value] || []; },
+        relationLabel(value) { return { DEPENDS_ON: '依赖', HOSTED_ON: '运行于', CONNECTS_TO: '连接', CONTAINS: '包含', BACKUP_OF: '备份自' }[value] || value; },
+        nodeName(id) { const node = this.topology.nodes.find(item => item.id === id); return node ? node.name : `#${id}`; },
+        actionLabel(value) { return { CREATE: '新增', UPDATE: '编辑', DELETE: '删除', IMPORT: '导入', IMPORT_RETRY: '导入失败行重试', LIFECYCLE: '生命周期流转', CREATE_RELATION: '创建资产关系', DELETE_RELATION: '删除资产关系', ARCHIVE: '审计归档', REGISTER: '用户注册', CHANGE_PASSWORD: '修改密码' }[value] || value || '-'; },
+        resourceLabel(value) { return { ASSET: '资产', ASSET_RELATION: '资产关系', PROJECT: '项目', USER: '用户', ACCOUNT: '账号', AUDIT: '审计日志' }[value] || value || '-'; },
         changeTypeLabel(value) { return { CREATE: '创建', UPDATE: '更新', DELETE: '删除', IMPORT: '导入' }[value] || value || '-'; },
         fieldLabel(value) { return { name: '名称', assetType: '类型', environment: '环境', privateIp: '内网 IP', publicIp: '外网 IP', hostname: '主机名', status: '状态', region: '区域', description: '描述', projectName: '项目' }[value] || value; },
         formatTime(value) { return value ? String(value).replace('T', ' ').substring(0, 19) : '-'; },
@@ -399,6 +478,7 @@ createApp({
             if (this.tab === 'users' && this.canManageUsers) this.users = await api('/users');
             if (this.tab === 'imports' && this.canWrite) await this.loadImports();
             if (this.tab === 'audits' && this.canManageUsers) await this.loadAudits();
+            if (this.tab === 'topology' && this.topologyProjectId) await this.loadTopology();
           } catch (error) {
             if (error.status === 428 || (this.user.passwordExpired && error.status === 401)) {
               this.passwordExpired = true;
@@ -413,9 +493,11 @@ createApp({
           if (tab === 'audits' && !this.canManageUsers) return;
           if (tab === 'imports' && !this.canWrite) return;
           this.tab = tab;
+          if (tab === 'topology' && !this.topologyProjectId && this.projects.length) this.topologyProjectId = String(this.projects[0].id);
           await this.load();
         },
         async loadAssets() {
+          this.selectedAssetIds = [];
           const params = new URLSearchParams();
           Object.entries(this.filters).forEach(([key, value]) => { if (value !== '' && value !== null && value !== undefined) params.set(key, value); });
           params.set('page', this.assetPage.page);
@@ -440,6 +522,7 @@ createApp({
         },
         async loadAudits() {
           const params = new URLSearchParams({ page: this.auditPage.page, size: this.auditPage.size });
+          Object.entries(this.auditFilters).forEach(([key, value]) => { if (value !== '' && value !== null && value !== undefined) params.set(key, value); });
           const data = await api('/audits?' + params.toString());
           this.audits = data.content || [];
           this.auditPage = {
@@ -452,10 +535,86 @@ createApp({
         },
         async openDetail(id) {
           this.detailAsset = await api('/assets/' + id);
+          this.lifecycleHistory = await api('/assets/' + id + '/lifecycle/history');
+          const options = this.lifecycleOptions(this.detailAsset.lifecycleState);
+          this.lifecycleTarget = options[0] || '';
+          this.lifecycleReason = '';
+        },
+        async changeLifecycle(asset) {
+          if (!this.lifecycleTarget) return;
+          try {
+            await api('/assets/' + asset.id + '/lifecycle', { method: 'PUT', body: JSON.stringify({ state: this.lifecycleTarget, reason: this.lifecycleReason }) });
+            this.notify('生命周期已更新'); await this.openDetail(asset.id); await this.loadAssets();
+          } catch (error) { this.notify(error.message, 'error'); }
+        },
+        async loadTopology() {
+          if (!this.topologyProjectId) { this.topology = { nodes: [], edges: [] }; return; }
+          try { this.topology = await api('/assets/topology?projectId=' + encodeURIComponent(this.topologyProjectId)); }
+          catch (error) { this.notify(error.message, 'error'); }
+        },
+        async createRelation() {
+          if (!this.relationDraft.sourceId || !this.relationDraft.targetId) return this.notify('请选择关系两端资产', 'error');
+          try {
+            await api('/assets/' + this.relationDraft.sourceId + '/relations', { method: 'POST', body: JSON.stringify({ targetId: this.relationDraft.targetId, type: this.relationDraft.type, description: this.relationDraft.description }) });
+            this.relationDraft.description = ''; this.notify('资产关系已添加'); await this.loadTopology();
+          } catch (error) { this.notify(error.message, 'error'); }
+        },
+        async removeRelation(edge) {
+          if (!confirm('确认删除这条资产关系？')) return;
+          try { await api('/assets/' + edge.sourceId + '/relations/' + edge.id, { method: 'DELETE' }); this.notify('关系已删除'); await this.loadTopology(); }
+          catch (error) { this.notify(error.message, 'error'); }
+        },
+        async searchAudits() { this.auditPage.page = 0; await this.loadAudits(); },
+        auditQuery() {
+          const params = new URLSearchParams();
+          Object.entries(this.auditFilters).forEach(([key, value]) => { if (value !== '' && value !== null && value !== undefined) params.set(key, value); });
+          return '?' + params.toString();
+        },
+        async downloadAudits() { await this.downloadFile('/audits/export' + this.auditQuery(), 'cmdb-operation-audits.csv', '审计记录已导出'); },
+        async archiveAudits() {
+          if (!confirm('将归档 1 年以前的审计记录？归档记录仍可在“查看归档”中检索和导出。')) return;
+          const cutoff = new Date(); cutoff.setFullYear(cutoff.getFullYear() - 1);
+          const localCutoff = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}T${String(cutoff.getHours()).padStart(2, '0')}:${String(cutoff.getMinutes()).padStart(2, '0')}:${String(cutoff.getSeconds()).padStart(2, '0')}`;
+          try { const result = await api('/audits/archive?before=' + encodeURIComponent(localCutoff), { method: 'POST' }); this.notify(`已归档 ${result.archivedCount} 条记录`); await this.loadAudits(); }
+          catch (error) { this.notify(error.message, 'error'); }
+        },
+        async openImportFailures(item) {
+          this.failureImport = item;
+          try { this.importFailures = await api('/assets/imports/' + item.id + '/failures'); }
+          catch (error) { this.notify(error.message, 'error'); }
+        },
+        editImportFailure(failure) {
+          this.editing = { id: failure.id };
+          this.form = { ...(failure.asset || {}), status: (failure.asset && failure.asset.status) || '' };
+          this.modalType = 'importFailure'; this.showModal = true;
         },
         async searchAssets() {
           this.assetPage.page = 0;
           await this.loadAssets();
+        },
+        toggleAssetSelection(id) {
+          this.selectedAssetIds = this.selectedAssetIds.includes(id)
+            ? this.selectedAssetIds.filter(selectedId => selectedId !== id)
+            : [...this.selectedAssetIds, id];
+        },
+        togglePageSelection(event) {
+          const select = typeof event === 'boolean' ? event : Boolean(event && event.target && event.target.checked);
+          const pageIds = this.assets.map(asset => asset.id);
+          this.selectedAssetIds = select
+            ? [...new Set([...this.selectedAssetIds, ...pageIds])]
+            : this.selectedAssetIds.filter(id => !pageIds.includes(id));
+        },
+        async deleteSelectedAssets() {
+          const ids = [...this.selectedAssetIds];
+          if (!ids.length) return;
+          if (!confirm(`确认删除选中的 ${ids.length} 项资产？此操作不可撤销。`)) return;
+          try {
+            const result = await api('/assets/batch', { method: 'DELETE', body: JSON.stringify(ids) });
+            this.selectedAssetIds = [];
+            this.notify(`已删除 ${result.deletedCount} 项资产`);
+            if (this.assets.length === ids.length && this.assetPage.page > 0) this.assetPage.page--;
+            await this.load();
+          } catch (error) { this.notify(error.message, 'error'); }
         },
         async setSort(field) {
           if (this.assetPage.sort === field) this.assetPage.direction = this.assetPage.direction === 'asc' ? 'desc' : 'asc';
@@ -484,7 +643,7 @@ createApp({
           if (type === 'password') {
             this.form = { currentPassword: '', newPassword: '', confirmPassword: '' };
           } else if (type === 'asset') {
-            this.form = item ? { ...item } : { status: 'ONLINE', environment: 'PRODUCTION', projectId: this.projects[0] && this.projects[0].id };
+            this.form = item ? { ...item } : { status: 'ONLINE', lifecycleState: 'IN_SERVICE', environment: 'PRODUCTION', projectId: this.projects[0] && this.projects[0].id };
             this.syncRegionDraft(this.form.region);
           } else if (type === 'project') {
             this.form = item ? { name: item.name, code: item.code, owner: item.owner, description: item.description } : {};
@@ -519,6 +678,10 @@ createApp({
               await this.load();
               return;
             }
+            if (this.modalType === 'importFailure') {
+              await api('/assets/imports/' + this.failureImport.id + '/failures/' + this.editing.id + '/retry?duplicateStrategy=MERGE', { method: 'PUT', body: JSON.stringify(this.form) });
+              this.close(); this.notify('修正成功，失败行已重新导入'); this.importFailures = await api('/assets/imports/' + this.failureImport.id + '/failures'); await this.load(); return;
+            }
             const path = this.modalType === 'asset' ? '/assets' : this.modalType === 'project' ? '/projects' : '/users';
             const url = this.editing ? path + '/' + this.editing.id : path;
             await api(url, { method: this.editing ? 'PUT' : 'POST', body: JSON.stringify(this.form) });
@@ -541,7 +704,7 @@ createApp({
             this.notify(error.message, 'error');
           }
         },
-        async importFile(event) {
+        async previewImport(event) {
           const file = event.target.files[0];
           event.target.value = '';
           if (!file) return;
@@ -549,15 +712,37 @@ createApp({
           try {
             const data = new FormData();
             data.append('file', file);
-            const result = await api('/assets/import', { method: 'POST', body: data });
-            this.notify(`导入 ${result.count} 条，跳过 ${result.skipped} 条${result.errors && result.errors.length ? '，请检查文件' : ''}`, result.skipped ? 'error' : 'success');
-            await this.load();
+            this.previewResult = await api('/assets/import/validate?duplicateStrategy=' + this.duplicateStrategy, { method: 'POST', body: data });
+            this.previewFile = file;
+            this.tab = 'imports';
+            await this.loadImports();
+            this.notify('预检完成，请确认结果后导入', this.previewResult.failedRows ? 'error' : 'success');
           } catch (error) {
             this.notify(error.message, 'error');
           } finally {
             this.importing = false;
           }
         },
+        selectImportFile() {
+          if (!this.canWrite) return;
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+          input.addEventListener('change', this.previewImport, { once: true });
+          input.click();
+        },
+        async confirmImport() {
+          if (!this.previewFile) return;
+          this.importing = true;
+          try {
+            const data = new FormData(); data.append('file', this.previewFile);
+            const result = await api('/assets/import?duplicateStrategy=' + this.duplicateStrategy, { method: 'POST', body: data });
+            this.notify(`导入 ${result.count} 条，失败 ${result.skipped} 条`, result.skipped ? 'error' : 'success');
+            this.clearImportPreview(); await this.load();
+          } catch (error) { this.notify(error.message, 'error'); }
+          finally { this.importing = false; }
+        },
+        clearImportPreview() { this.previewFile = null; this.previewResult = null; },
         async downloadCsv() {
           await this.downloadFile('/assets/export' + this.filterQuery(), 'cmdb-assets.csv', 'CSV 已导出');
         },
