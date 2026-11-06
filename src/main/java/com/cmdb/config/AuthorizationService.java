@@ -24,6 +24,15 @@ public class AuthorizationService {
                 .orElse(null);
     }
 
+    public Access accessOf(String username) {
+        if (username == null) return null;
+        return users.findByUsername(username)
+                .filter(user -> Boolean.TRUE.equals(user.getEnabled()))
+                .map(user -> new Access(user.getRole(),
+                        PasswordPolicy.isExpired(user.getPasswordChangedAt(), LocalDateTime.now())))
+                .orElse(null);
+    }
+
     public boolean isPasswordExpired(String username) {
         return users.findByUsername(username)
                 .map(user -> PasswordPolicy.isExpired(user.getPasswordChangedAt(), LocalDateTime.now()))
@@ -61,5 +70,8 @@ public class AuthorizationService {
     private boolean isWrite(String method) {
         return "POST".equals(method) || "PUT".equals(method)
                 || "PATCH".equals(method) || "DELETE".equals(method);
+    }
+
+    public record Access(String role, boolean passwordExpired) {
     }
 }

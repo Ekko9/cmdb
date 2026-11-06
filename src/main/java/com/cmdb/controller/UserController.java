@@ -3,6 +3,7 @@ package com.cmdb.controller;
 import com.cmdb.config.AuditService;
 import com.cmdb.config.BadRequestException;
 import com.cmdb.config.ResourceNotFoundException;
+import com.cmdb.config.PasswordPolicy;
 import com.cmdb.entity.User;
 import com.cmdb.repo.UserRepository;
 import jakarta.servlet.http.HttpServletRequest;
@@ -17,7 +18,7 @@ import java.time.LocalDateTime;
 @RequestMapping("/api/users")
 public class UserController {
     private static final Set<String> ROLES = new HashSet<>(Arrays.asList("ADMIN", "OPERATOR", "VIEWER"));
-    private static final String PASSWORD_PATTERN = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{8,}$";
+    private static final String USERNAME_PATTERN = "^[A-Za-z0-9._-]{3,50}$";
 
     private final UserRepository users;
     private final BCryptPasswordEncoder encoder;
@@ -41,14 +42,16 @@ public class UserController {
     @PostMapping
     public Map<String, Object> create(HttpServletRequest request, @RequestBody Map<String, String> body) {
         String username = trimToNull(body.get("username"));
-        if (username == null) throw new BadRequestException("用户名不能为空");
+        if (username == null || !username.matches(USERNAME_PATTERN)) {
+            throw new BadRequestException("用户名需为 3 至 50 位字母、数字、点、下划线或连字符");
+        }
         if (users.findByUsername(username).isPresent()) throw new BadRequestException("用户名已存在");
 
         User user = new User();
         user.setUsername(username);
         user.setPassword(encoder.encode(requirePassword(body.get("password"))));
         user.setPasswordChangedAt(LocalDateTime.now());
-        user.setDisplayName(defaultText(body.get("displayName"), username));
+        user.setDisplayName(displayName(body.get("displayName"), username));
         user.setRole(normalizeRole(body.get("role")));
         user.setEnabled(true);
         User saved = users.save(user);
@@ -67,7 +70,7 @@ public class UserController {
                 && (!enabled || !"ADMIN".equalsIgnoreCase(role)) && enabledAdmins.size() <= 1) {
             throw new BadRequestException("不能停用或降权最后一位启用的管理员");
         }
-        if (body.containsKey("displayName")) user.setDisplayName(defaultText(body.get("displayName"), user.getUsername()));
+        if (body.containsKey("displayName")) user.setDisplayName(displayName(body.get("displayName"), user.getUsername()));
         user.setRole(role);
         user.setEnabled(enabled);
         if (body.containsKey("password") && body.get("password") != null && !body.get("password").trim().isEmpty()) {
@@ -94,8 +97,8 @@ public class UserController {
     }
 
     private String requirePassword(String password) {
-        if (password == null || !password.matches(PASSWORD_PATTERN)) {
-            throw new BadRequestException("密码至少 8 位，且必须包含大写字母、小写字母、数字和特殊符号");
+        if (!PasswordPolicy.isValid(password)) {
+            throw new BadRequestException("密码需为 8 至 72 位，且必须包含大写字母、小写字母、数字和特殊符号");
         }
         return password;
     }
@@ -109,6 +112,12 @@ public class UserController {
     private String defaultText(String value, String fallback) {
         String trimmed = trimToNull(value);
         return trimmed == null ? fallback : trimmed;
+    }
+
+    private String displayName(String value, String fallback) {
+        String result = defaultText(value, fallback);
+        if (result.length() > 100) throw new BadRequestException("显示名称不能超过 100 个字符");
+        return result;
     }
 
     private boolean parseEnabled(String value) {

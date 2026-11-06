@@ -153,6 +153,9 @@ CREATE TABLE IF NOT EXISTS `cmdb_asset` (
   `created_at` DATETIME(6) NULL,
   `updated_at` DATETIME(6) NULL,
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_cmdb_asset_project_name` (`project_id`, `name`),
+  UNIQUE KEY `uk_cmdb_asset_private_ip` (`private_ip`),
+  UNIQUE KEY `uk_cmdb_asset_public_ip` (`public_ip`),
   KEY `idx_cmdb_asset_project_id` (`project_id`),
   KEY `idx_cmdb_asset_asset_type` (`asset_type`),
   KEY `idx_cmdb_asset_status` (`status`),
@@ -175,6 +178,53 @@ SET @cmdb_asset_lifecycle_sql = IF(@cmdb_asset_lifecycle_exists = 0,
 PREPARE cmdb_asset_lifecycle_stmt FROM @cmdb_asset_lifecycle_sql;
 EXECUTE cmdb_asset_lifecycle_stmt;
 DEALLOCATE PREPARE cmdb_asset_lifecycle_stmt;
+
+-- Enforce the same duplicate rules used by asset creation and import. Existing
+-- duplicate names/IPs must be reconciled before these indexes can be added.
+UPDATE `cmdb_asset` SET `private_ip` = NULLIF(TRIM(`private_ip`), '') WHERE `private_ip` IS NOT NULL;
+UPDATE `cmdb_asset` SET `public_ip` = NULLIF(TRIM(`public_ip`), '') WHERE `public_ip` IS NOT NULL;
+
+SET @cmdb_asset_project_name_unique_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_asset'
+    AND INDEX_NAME = 'uk_cmdb_asset_project_name'
+);
+SET @cmdb_asset_project_name_unique_sql = IF(
+  @cmdb_asset_project_name_unique_exists = 0,
+  'ALTER TABLE `cmdb_asset` ADD UNIQUE KEY `uk_cmdb_asset_project_name` (`project_id`, `name`)',
+  'SELECT 1'
+);
+PREPARE cmdb_asset_project_name_unique_stmt FROM @cmdb_asset_project_name_unique_sql;
+EXECUTE cmdb_asset_project_name_unique_stmt;
+DEALLOCATE PREPARE cmdb_asset_project_name_unique_stmt;
+
+SET @cmdb_asset_private_ip_unique_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_asset'
+    AND INDEX_NAME = 'uk_cmdb_asset_private_ip'
+);
+SET @cmdb_asset_private_ip_unique_sql = IF(
+  @cmdb_asset_private_ip_unique_exists = 0,
+  'ALTER TABLE `cmdb_asset` ADD UNIQUE KEY `uk_cmdb_asset_private_ip` (`private_ip`)',
+  'SELECT 1'
+);
+PREPARE cmdb_asset_private_ip_unique_stmt FROM @cmdb_asset_private_ip_unique_sql;
+EXECUTE cmdb_asset_private_ip_unique_stmt;
+DEALLOCATE PREPARE cmdb_asset_private_ip_unique_stmt;
+
+SET @cmdb_asset_public_ip_unique_exists = (
+  SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'cmdb_asset'
+    AND INDEX_NAME = 'uk_cmdb_asset_public_ip'
+);
+SET @cmdb_asset_public_ip_unique_sql = IF(
+  @cmdb_asset_public_ip_unique_exists = 0,
+  'ALTER TABLE `cmdb_asset` ADD UNIQUE KEY `uk_cmdb_asset_public_ip` (`public_ip`)',
+  'SELECT 1'
+);
+PREPARE cmdb_asset_public_ip_unique_stmt FROM @cmdb_asset_public_ip_unique_sql;
+EXECUTE cmdb_asset_public_ip_unique_stmt;
+DEALLOCATE PREPARE cmdb_asset_public_ip_unique_stmt;
 
 CREATE TABLE IF NOT EXISTS `cmdb_asset_relation` (
   `id` BIGINT NOT NULL AUTO_INCREMENT,
@@ -300,6 +350,40 @@ PREPARE cmdb_audit_archived_index_stmt FROM @cmdb_audit_archived_index_sql;
 EXECUTE cmdb_audit_archived_index_stmt;
 DEALLOCATE PREPARE cmdb_audit_archived_index_stmt;
 
+CREATE TABLE IF NOT EXISTS `cmdb_operation_audit_archive` (
+  `id` BIGINT NOT NULL,
+  `operator` VARCHAR(50) NULL,
+  `role` VARCHAR(30) NULL,
+  `action` VARCHAR(50) NOT NULL,
+  `resource_type` VARCHAR(50) NOT NULL,
+  `resource_id` VARCHAR(80) NULL,
+  `resource_name` VARCHAR(200) NULL,
+  `result` VARCHAR(30) NOT NULL,
+  `message` VARCHAR(1000) NULL,
+  `client_ip` VARCHAR(64) NULL,
+  `created_at` DATETIME(6) NULL,
+  `archived_at` DATETIME(6) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_operation_audit_archive_time` (`created_at`, `id`),
+  KEY `idx_operation_audit_archive_resource` (`resource_type`, `resource_id`),
+  KEY `idx_operation_audit_archive_operator` (`operator`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Move records archived by older releases into the dedicated archive table.
+-- INSERT IGNORE plus the shared primary key makes this migration repeatable.
+INSERT IGNORE INTO `cmdb_operation_audit_archive`
+  (`id`, `operator`, `role`, `action`, `resource_type`, `resource_id`, `resource_name`,
+   `result`, `message`, `client_ip`, `created_at`, `archived_at`)
+SELECT `id`, `operator`, `role`, `action`, `resource_type`, `resource_id`, `resource_name`,
+       `result`, `message`, `client_ip`, `created_at`, COALESCE(`archived_at`, CURRENT_TIMESTAMP(6))
+FROM `cmdb_operation_audit`
+WHERE `archived` = 1;
+
+DELETE current_audit
+FROM `cmdb_operation_audit` current_audit
+INNER JOIN `cmdb_operation_audit_archive` archived_audit ON archived_audit.`id` = current_audit.`id`
+WHERE current_audit.`archived` = 1;
+
 -- Optional sample project and assets. Disabled unless explicitly enabled.
 INSERT INTO `cmdb_project` (`name`, `code`, `owner`, `description`)
 SELECT '演示项目', 'DEMO', '系统管理员', 'CMDB 功能演示项目'
@@ -349,7 +433,7 @@ SELECT
   (SELECT COUNT(*) FROM `cmdb_import_audit`) AS import_audit_count,
   (SELECT COUNT(*) FROM `cmdb_import_failure`) AS import_failure_count,
   (SELECT COUNT(*) FROM `cmdb_operation_audit`) AS operation_audit_count,
-  (SELECT COUNT(*) FROM `cmdb_operation_audit` WHERE `archived` = 1) AS archived_audit_count;
+  (SELECT COUNT(*) FROM `cmdb_operation_audit_archive`) AS archived_audit_count;
 
 SELECT
   (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS

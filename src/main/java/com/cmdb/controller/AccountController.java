@@ -2,10 +2,12 @@ package com.cmdb.controller;
 
 import com.cmdb.config.AuditService;
 import com.cmdb.config.BadRequestException;
+import com.cmdb.config.PasswordPolicy;
 import com.cmdb.entity.User;
 import com.cmdb.repo.UserRepository;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -14,8 +16,6 @@ import java.time.LocalDateTime;
 @RestController
 @RequestMapping("/api/account")
 public class AccountController {
-    private static final String PASSWORD_PATTERN = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{8,}$";
-
     private final UserRepository users;
     private final BCryptPasswordEncoder encoder;
     private final AuditService auditService;
@@ -27,6 +27,7 @@ public class AccountController {
     }
 
     @PutMapping("/password")
+    @Transactional
     public Map<String, Object> changePassword(HttpServletRequest request, @RequestBody Map<String, String> body) {
         String username = (String) request.getAttribute("username");
         User user = users.findByUsername(username == null ? "" : username)
@@ -37,8 +38,8 @@ public class AccountController {
         if (currentPassword == null || !encoder.matches(currentPassword, user.getPassword())) {
             throw new BadRequestException("当前密码不正确");
         }
-        if (newPassword == null || !newPassword.matches(PASSWORD_PATTERN)) {
-            throw new BadRequestException("密码至少 8 位，且必须包含大写字母、小写字母、数字和特殊符号");
+        if (!PasswordPolicy.isValid(newPassword)) {
+            throw new BadRequestException("密码需为 8 至 72 位，且必须包含大写字母、小写字母、数字和特殊符号");
         }
         if (!newPassword.equals(confirmPassword)) {
             throw new BadRequestException("两次输入的新密码不一致");

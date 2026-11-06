@@ -16,7 +16,6 @@ import java.util.*;
 
 @RestController @RequestMapping("/api/auth")
 public class AuthController {
-    private static final String PASSWORD_PATTERN = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{8,}$";
     private static final String USERNAME_PATTERN = "^[A-Za-z0-9._-]{3,50}$";
 
     private final UserRepository users;
@@ -39,8 +38,8 @@ public class AuthController {
         if (username == null || !username.matches(USERNAME_PATTERN)) {
             throw new BadRequestException("用户名需为 3 至 50 位字母、数字、点、下划线或连字符");
         }
-        if (password == null || !password.matches(PASSWORD_PATTERN)) {
-            throw new BadRequestException("密码至少 8 位，且必须包含大写字母、小写字母、数字和特殊符号");
+        if (!PasswordPolicy.isValid(password)) {
+            throw new BadRequestException("密码需为 8 至 72 位，且必须包含大写字母、小写字母、数字和特殊符号");
         }
         if (displayName != null && displayName.length() > 100) {
             throw new BadRequestException("显示名称不能超过 100 个字符");

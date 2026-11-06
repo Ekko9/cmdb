@@ -86,9 +86,11 @@ public class ProjectController {
             throw new BadRequestException("项目名称不能为空");
         }
         form.setName(form.getName().trim());
-        form.setCode(trimToNull(form.getCode()));
-        form.setOwner(trimToNull(form.getOwner()));
-        form.setDescription(trimToNull(form.getDescription()));
+        if (form.getName().length() > 100) throw new BadRequestException("项目名称不能超过 100 个字符");
+        form.setCode(limit(trimToNull(form.getCode()), 30, "项目编码"));
+        if (form.getCode() != null) form.setCode(form.getCode().toUpperCase(Locale.ROOT));
+        form.setOwner(limit(trimToNull(form.getOwner()), 50, "负责人"));
+        form.setDescription(limit(trimToNull(form.getDescription()), 500, "项目描述"));
     }
 
     private Project saveProject(Project project) {
@@ -103,6 +105,13 @@ public class ProjectController {
         if (value == null) return null;
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String limit(String value, int max, String label) {
+        if (value != null && value.length() > max) {
+            throw new BadRequestException(label + "不能超过 " + max + " 个字符");
+        }
+        return value;
     }
 
     private Map<String, Object> view(Project project, long assetCount) {

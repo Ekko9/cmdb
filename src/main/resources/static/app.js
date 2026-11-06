@@ -12,6 +12,11 @@ const api = async (path, options = {}) => {
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401 && path !== '/auth/login') {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      window.location.reload();
+    }
     const error = Error(data.message || '请求失败');
     error.status = response.status;
     throw error;
@@ -31,7 +36,7 @@ const loginTemplate = `
         <h2>{{ mode === 'register' ? '申请账号' : '欢迎回来' }}</h2>
         <p class="sub">{{ mode === 'register' ? '注册后由管理员审核启用' : '登录 Orbit CMDB 管理控制台' }}</p>
         <div v-if="loginError" class="error">{{ loginError }}</div>
-        <div v-if="successMessage" class="notice">{{ successMessage }}</div>
+        <div v-if="loginSuccess || successMessage" class="notice">{{ loginSuccess || successMessage }}</div>
         <div class="field">
           <label>用户名</label>
           <input v-model.trim="loginForm.username" autocomplete="username" minlength="3" maxlength="50" required autofocus>
@@ -42,13 +47,13 @@ const loginTemplate = `
         </div>
         <div class="field">
           <label>密码</label>
-          <input v-model="loginForm.password" type="password" :autocomplete="mode === 'register' ? 'new-password' : 'current-password'" :minlength="mode === 'register' ? 8 : null" :pattern="mode === 'register' ? '(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}' : null" required>
+          <input v-model="loginForm.password" type="password" :autocomplete="mode === 'register' ? 'new-password' : 'current-password'" :minlength="mode === 'register' ? 8 : null" :maxlength="mode === 'register' ? 72 : null" :pattern="mode === 'register' ? '(?=\\S{8,72}$)(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9])' : null" required>
         </div>
         <button class="primary" type="submit" style="width:100%" :disabled="busy">
           {{ busy ? '请稍候…' : (mode === 'register' ? '提交注册申请' : '进入控制台') }}
         </button>
         <p class="auth-links" v-if="mode === 'login'"><span class="auth-hint">密码遗忘请联系管理员重置</span><button class="link-btn" type="button" @click="mode = 'register'; clearMessages()">注册账号</button></p>
-        <p class="auth-hint" v-if="mode === 'register'">密码至少 8 位，需包含大小写字母、数字和特殊符号。新账号默认为停用的只读账号，等待管理员审核启用。</p>
+        <p class="auth-hint" v-if="mode === 'register'">密码需为 8 至 72 位，包含大小写字母、数字和特殊符号。新账号默认为停用的只读账号，等待管理员审核启用。</p>
         <p class="auth-links" v-if="mode === 'register'"><button class="link-btn" type="button" @click="mode = 'login'; clearMessages()">返回登录</button></p>
       </form>
     </section>
@@ -281,12 +286,12 @@ const appTemplate = `
         <div class="form-grid">
           <template v-if="modalType==='password'">
             <div class="field wide"><label>当前密码 *</label><input type="password" v-model="form.currentPassword" autocomplete="current-password" required></div>
-            <div class="field"><label>新密码 *</label><input type="password" v-model="form.newPassword" minlength="8" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}" autocomplete="new-password" required></div>
-            <div class="field"><label>确认新密码 *</label><input type="password" v-model="form.confirmPassword" minlength="8" autocomplete="new-password" required></div>
-            <p class="import-hint wide">密码至少 8 位，必须包含大写字母、小写字母、数字和特殊符号。</p>
+            <div class="field"><label>新密码 *</label><input type="password" v-model="form.newPassword" minlength="8" maxlength="72" pattern="(?=\\S{8,72}$)(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9])" autocomplete="new-password" required></div>
+            <div class="field"><label>确认新密码 *</label><input type="password" v-model="form.confirmPassword" minlength="8" maxlength="72" autocomplete="new-password" required></div>
+            <p class="import-hint wide">密码需为 8 至 72 位，必须包含大写字母、小写字母、数字和特殊符号。</p>
           </template>
           <template v-else-if="modalType==='asset'">
-            <div class="field"><label>资产名称 *</label><input v-model.trim="form.name" required></div>
+            <div class="field"><label>资产名称 *</label><input v-model.trim="form.name" maxlength="100" required></div>
             <div class="field"><label>资产类型</label><select v-model="form.assetType"><option value="">请选择</option><option v-if="form.assetType && !assetTypes.includes(form.assetType)" :value="form.assetType">{{ assetTypeLabel(form.assetType) }}</option><option v-for="type in assetTypes" :value="type" :key="type">{{ assetTypeLabel(type) }}</option></select></div>
             <div class="field"><label>项目 *</label><select v-model="form.projectId" required><option v-for="project in projects" :value="project.id" :key="project.id">{{ project.name }}</option></select></div>
             <div class="field"><label>环境</label><select v-model="form.environment"><option value="PRODUCTION">生产环境</option><option value="STAGING">预发布环境</option><option value="DEVELOPMENT">开发环境</option></select></div>
@@ -295,10 +300,10 @@ const appTemplate = `
             <div class="field"><label>洲</label><select v-model="regionDraft.continent" @change="onRegionContinentChange"><option value="">请选择</option><option v-for="continent in regionContinents" :value="continent" :key="continent">{{ continent }}</option></select></div>
             <div class="field"><label>国家 / 地区</label><select v-model="regionDraft.country" @change="onRegionCountryChange" :disabled="!regionDraft.continent"><option value="">请选择</option><option v-for="country in regionCountries" :value="country" :key="country">{{ country }}</option></select></div>
             <div class="field"><label>城市 / 区域</label><select v-model="form.region" :disabled="!regionDraft.country"><option value="">请选择</option><option v-if="form.region && !knownRegionValues.includes(form.region)" :value="form.region">{{ form.region }}</option><option v-for="item in regionCities" :value="item.label" :key="item.id">{{ item.region }}</option></select></div>
-            <div class="field"><label>内网 IP</label><input v-model.trim="form.privateIp"></div>
-            <div class="field"><label>外网 IP</label><input v-model.trim="form.publicIp"></div>
-            <div class="field wide"><label>主机名</label><input v-model.trim="form.hostname"></div>
-            <div class="field wide"><label>描述</label><textarea v-model.trim="form.description" rows="3"></textarea></div>
+            <div class="field"><label>内网 IP</label><input v-model.trim="form.privateIp" maxlength="45"></div>
+            <div class="field"><label>外网 IP</label><input v-model.trim="form.publicIp" maxlength="45"></div>
+            <div class="field wide"><label>主机名</label><input v-model.trim="form.hostname" maxlength="100"></div>
+            <div class="field wide"><label>描述</label><textarea v-model.trim="form.description" maxlength="500" rows="3"></textarea></div>
           </template>
           <template v-else-if="modalType==='importFailure'">
             <div class="field"><label>资产名称 *</label><input v-model.trim="form.name" required></div>
@@ -310,15 +315,15 @@ const appTemplate = `
             <div class="field wide"><label>区域</label><input v-model.trim="form.region"></div><div class="field wide"><label>描述</label><textarea v-model.trim="form.description" rows="3"></textarea></div>
           </template>
           <template v-else-if="modalType==='project'">
-            <div class="field"><label>项目名称 *</label><input v-model.trim="form.name" required></div>
-            <div class="field"><label>项目编码</label><input v-model.trim="form.code" placeholder="唯一编码"></div>
-            <div class="field wide"><label>负责人</label><input v-model.trim="form.owner"></div>
-            <div class="field wide"><label>描述</label><textarea v-model.trim="form.description" rows="3"></textarea></div>
+            <div class="field"><label>项目名称 *</label><input v-model.trim="form.name" maxlength="100" required></div>
+            <div class="field"><label>项目编码</label><input v-model.trim="form.code" maxlength="30" placeholder="唯一编码"></div>
+            <div class="field wide"><label>负责人</label><input v-model.trim="form.owner" maxlength="50"></div>
+            <div class="field wide"><label>描述</label><textarea v-model.trim="form.description" maxlength="500" rows="3"></textarea></div>
           </template>
           <template v-else>
-            <div class="field"><label>用户名 *</label><input v-model.trim="form.username" :disabled="!!editing" required></div>
-            <div class="field"><label>显示名称</label><input v-model.trim="form.displayName"></div>
-            <div class="field"><label>{{ editing ? '重置密码' : '密码' }}{{ editing ? '（填写时生效）' : ' *' }}</label><input type="password" v-model="form.password" minlength="8" pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}" :required="!editing"></div>
+            <div class="field"><label>用户名 *</label><input v-model.trim="form.username" minlength="3" maxlength="50" pattern="[A-Za-z0-9._-]{3,50}" :disabled="!!editing" required></div>
+            <div class="field"><label>显示名称</label><input v-model.trim="form.displayName" maxlength="100"></div>
+            <div class="field"><label>{{ editing ? '重置密码' : '密码' }}{{ editing ? '（填写时生效）' : ' *' }}</label><input type="password" v-model="form.password" minlength="8" maxlength="72" pattern="(?=\\S{8,72}$)(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9])" :required="!editing"></div>
             <div class="field"><label>角色</label><select v-model="form.role"><option value="OPERATOR">运维人员</option><option value="ADMIN">管理员</option><option value="VIEWER">只读用户</option></select></div>
             <div v-if="editing" class="field"><label>状态</label><select v-model="form.enabled"><option :value="true">启用</option><option :value="false">停用</option></select></div>
           </template>
@@ -358,26 +363,28 @@ const appTemplate = `
   </div>`;
 
 createApp({
-  template: `<component :is="isLogin ? 'main-app' : 'login-form'" :login-form="loginForm" :login-error="loginError"></component>`,
+  template: `<component :is="isLogin ? 'main-app' : 'login-form'" :login-form="loginForm" :login-error="loginError" :login-success="loginSuccess"></component>`,
   data() {
     return {
       token: localStorage.token || '',
       user: JSON.parse(localStorage.user || 'null'),
       loginForm: { username: '', password: '' },
-      loginError: ''
+      loginError: '',
+      loginSuccess: ''
     };
   },
   computed: { isLogin() { return Boolean(this.token && this.user); } },
   components: {
     'login-form': {
       template: loginTemplate,
-      props: { loginForm: Object, loginError: String },
+      props: { loginForm: Object, loginError: String, loginSuccess: String },
       data() { return { busy: false, mode: 'login', successMessage: '', registerForm: { displayName: '' } }; },
       methods: {
-        clearMessages() { this.$root.loginError = ''; this.successMessage = ''; },
+        clearMessages() { this.$root.loginError = ''; this.$root.loginSuccess = ''; this.successMessage = ''; },
         async login() {
           this.busy = true;
           this.$root.loginError = '';
+          this.$root.loginSuccess = '';
           try {
             if (this.mode === 'register') {
               const data = await api('/auth/register', { method: 'POST', body: JSON.stringify({ ...this.registerForm, username: this.loginForm.username, password: this.loginForm.password }) });
@@ -572,7 +579,7 @@ createApp({
         },
         async downloadAudits() { await this.downloadFile('/audits/export' + this.auditQuery(), 'cmdb-operation-audits.csv', '审计记录已导出'); },
         async archiveAudits() {
-          if (!confirm('将归档 1 年以前的审计记录？归档记录仍可在“查看归档”中检索和导出。')) return;
+          if (!confirm('将归档 1 年以前的审计记录？归档记录仍可在“已归档日志”范围中检索和导出。')) return;
           const cutoff = new Date(); cutoff.setFullYear(cutoff.getFullYear() - 1);
           const localCutoff = `${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, '0')}-${String(cutoff.getDate()).padStart(2, '0')}T${String(cutoff.getHours()).padStart(2, '0')}:${String(cutoff.getMinutes()).padStart(2, '0')}:${String(cutoff.getSeconds()).padStart(2, '0')}`;
           try { const result = await api('/audits/archive?before=' + encodeURIComponent(localCutoff), { method: 'POST' }); this.notify(`已归档 ${result.archivedCount} 条记录`); await this.loadAudits(); }
@@ -669,13 +676,14 @@ createApp({
           this.saving = true;
           try {
             if (this.modalType === 'password') {
-              const passwordStatus = await api('/account/password', { method: 'PUT', body: JSON.stringify(this.form) });
-              this.$root.user = { ...this.user, ...passwordStatus };
-              localStorage.user = JSON.stringify(this.$root.user);
-              this.passwordExpired = false;
-              this.close();
-              this.notify('密码修改成功');
-              await this.load();
+              await api('/account/password', { method: 'PUT', body: JSON.stringify(this.form) });
+              localStorage.removeItem('token');
+              localStorage.removeItem('user');
+              this.$root.loginForm = { username: '', password: '' };
+              this.$root.loginError = '';
+              this.$root.loginSuccess = '密码修改成功，请使用新密码重新登录';
+              this.$root.token = '';
+              this.$root.user = null;
               return;
             }
             if (this.modalType === 'importFailure') {
@@ -766,6 +774,9 @@ createApp({
         async downloadFile(path, filename, message) {
           try {
             const response = await fetch('/api' + path, { headers: { Authorization: 'Bearer ' + localStorage.token } });
+            if (response.status === 401) {
+              localStorage.removeItem('token'); localStorage.removeItem('user'); window.location.reload(); return;
+            }
             if (!response.ok) throw Error('导出失败');
             const blob = await response.blob();
             const url = URL.createObjectURL(blob);

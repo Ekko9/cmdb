@@ -71,6 +71,16 @@ class UserControllerTest {
         verify(users, never()).delete(any(User.class));
     }
 
+    @Test
+    void rejectsUsernamesThatCannotBeUsedInTokens() {
+        UserRepository users = mock(UserRepository.class);
+        UserController controller = controller(users);
+
+        assertThrows(BadRequestException.class, () -> controller.create(
+                request(), Map.of("username", "bad:name", "password", "StrongPass1!")));
+        verify(users, never()).save(any(User.class));
+    }
+
     private UserController controller(UserRepository users) {
         return new UserController(users, new BCryptPasswordEncoder(), mock(AuditService.class));
     }

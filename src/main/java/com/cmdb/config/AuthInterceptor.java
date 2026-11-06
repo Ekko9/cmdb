@@ -22,13 +22,14 @@ public class AuthInterceptor implements HandlerInterceptor {
         String header = request.getHeader("Authorization");
         String username = header != null && header.startsWith("Bearer ") ? tokenService.username(header.substring(7)) : null;
         if (username == null) { unauthorized(response, "登录已失效"); return false; }
-        String role = authorizationService.roleOf(username);
-        if (role == null) {
+        AuthorizationService.Access access = authorizationService.accessOf(username);
+        if (access == null) {
             unauthorized(response, "用户已停用或不存在");
             return false;
         }
+        String role = access.role();
         boolean passwordChangeRequest = uri.equals("/api/account/password") && HttpMethod.PUT.matches(request.getMethod());
-        if (!passwordChangeRequest && authorizationService.isPasswordExpired(username)) {
+        if (!passwordChangeRequest && access.passwordExpired()) {
             response.setStatus(428);
             response.setContentType("application/json;charset=UTF-8");
             response.getWriter().write("{\"message\":\"密码已超过 3 个月有效期，请先修改密码\",\"code\":\"PASSWORD_EXPIRED\"}");

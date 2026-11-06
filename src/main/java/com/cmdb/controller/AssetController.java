@@ -3,6 +3,7 @@ package com.cmdb.controller;
 import com.cmdb.config.AuditService;
 import com.cmdb.config.BadRequestException;
 import com.cmdb.config.CsvExportSanitizer;
+import com.cmdb.config.IpAddressValidator;
 import com.cmdb.config.ResourceNotFoundException;
 import com.cmdb.entity.Asset;
 import com.cmdb.entity.AssetTypeOption;
@@ -32,6 +33,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -47,6 +49,16 @@ public class AssetController {
     private static final int MAX_IMPORT_ROWS = 10_000;
     private static final int MAX_EXPORT_ROWS = 10_000;
     private enum DuplicateStrategy { SKIP, MERGE }
+    private static final class ImportValidationContext {
+        private final Map<String, String> names = new HashMap<>();
+        private final Map<String, String> privateIps = new HashMap<>();
+        private final Map<String, String> publicIps = new HashMap<>();
+        private int nextFileGroup = 1;
+
+        private String nextGroup() {
+            return "FILE:" + nextFileGroup++;
+        }
+    }
     private final AssetRepository assets;
     private final ProjectRepository projects;
     private final AssetTypeOptionRepository assetTypes;
@@ -117,7 +129,9 @@ public class AssetController {
     @PostMapping
     @Transactional
     public Map<String, Object> create(HttpServletRequest request, @RequestBody Map<String, Object> body) {
-        Asset asset = assets.save(from(body, new Asset()));
+        Asset asset = from(body, new Asset());
+        ensureAssetUnique(asset);
+        asset = saveAsset(asset);
         auditService.assetChange(asset.getId(), asset.getName(), "CREATE", null, null, snapshot(asset), auditService.operator(request));
         auditService.operation(request, "CREATE", "ASSET", asset.getId(), asset.getName(), "SUCCESS", "新增资产");
         return view(asset);
@@ -128,7 +142,9 @@ public class AssetController {
     public Map<String, Object> update(HttpServletRequest request, @PathVariable Long id, @RequestBody Map<String, Object> body) {
         Asset asset = assets.findById(id).orElseThrow(() -> new ResourceNotFoundException("资产不存在"));
         Map<String, String> before = snapshotMap(asset);
-        Asset saved = assets.save(from(body, asset));
+        from(body, asset);
+        ensureAssetUnique(asset);
+        Asset saved = saveAsset(asset);
         recordAssetDiff(saved, before, auditService.operator(request));
         auditService.operation(request, "UPDATE", "ASSET", saved.getId(), saved.getName(), "SUCCESS", "编辑资产");
         return view(saved);
@@ -237,12 +253,12 @@ public class AssetController {
 
     private Map<String, Object> validateCsv(MultipartFile file, DuplicateStrategy strategy) throws IOException {
         List<Map<String, Object>> errors = new ArrayList<>(); int total = 0, valid = 0;
-        Set<String> names = new HashSet<>(), privateIps = new HashSet<>(), publicIps = new HashSet<>();
+        ImportValidationContext context = new ImportValidationContext();
         CSVFormat format = CSVFormat.DEFAULT.builder().setSkipHeaderRecord(true).setHeader().setTrim(true).build();
         try (Reader reader = new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8); CSVParser parser = new CSVParser(reader, format)) {
             for (CSVRecord record : parser) {
                 total++; if (total > MAX_IMPORT_ROWS) throw new BadRequestException("单次最多导入 " + MAX_IMPORT_ROWS + " 行");
-                Map<String, Object> body = csvBody(record); String reason = record.size() < 7 ? "字段不足，至少需要 7 列" : validateCandidate(body, strategy, names, privateIps, publicIps);
+                Map<String, Object> body = csvBody(record); String reason = record.size() < 7 ? "字段不足，至少需要 7 列" : validateCandidate(body, strategy, context);
                 if (reason == null) valid++; else if (errors.size() < 200) errors.add(Map.of("rowNumber", record.getRecordNumber() + 1, "reason", reason, "rawData", recordData(record)));
             }
         }
@@ -251,7 +267,7 @@ public class AssetController {
 
     private Map<String, Object> validateExcel(MultipartFile file, DuplicateStrategy strategy) throws IOException {
         List<Map<String, Object>> errors = new ArrayList<>(); int total = 0, valid = 0;
-        Set<String> names = new HashSet<>(), privateIps = new HashSet<>(), publicIps = new HashSet<>();
+        ImportValidationContext context = new ImportValidationContext();
         try (Workbook workbook = WorkbookFactory.create(file.getInputStream())) {
             Sheet sheet = workbook.getSheetAt(0); if (sheet.getLastRowNum() > MAX_IMPORT_ROWS) throw new BadRequestException("单次最多导入 " + MAX_IMPORT_ROWS + " 行");
             DataFormatter formatter = new DataFormatter();
@@ -262,30 +278,58 @@ public class AssetController {
                 body.put("privateIp", cell(row, 3, formatter)); body.put("publicIp", cell(row, 4, formatter)); body.put("hostname", cell(row, 5, formatter));
                 body.put("projectName", cell(row, 6, formatter)); body.put("status", cell(row, 7, formatter)); body.put("region", cell(row, 8, formatter));
                 body.put("description", cell(row, 9, formatter));
-                String reason = validateCandidate(body, strategy, names, privateIps, publicIps);
+                String reason = validateCandidate(body, strategy, context);
                 if (reason == null) valid++; else if (errors.size() < 200) errors.add(Map.of("rowNumber", i + 1, "reason", reason, "rawData", rowData(row, formatter)));
             }
         }
         return validationResult(total, valid, errors, strategy);
     }
 
-    private String validateCandidate(Map<String, Object> body, DuplicateStrategy strategy, Set<String> names,
-                                     Set<String> privateIps, Set<String> publicIps) {
+    private String validateCandidate(Map<String, Object> body, DuplicateStrategy strategy,
+                                     ImportValidationContext context) {
         try {
             Asset candidate = from(body, new Asset());
             String nameKey = candidate.getProject().getId() + "|" + normalizeKey(candidate.getName());
             String privateKey = normalizeKey(candidate.getPrivateIp()), publicKey = normalizeKey(candidate.getPublicIp());
-            boolean repeated = !names.add(nameKey) || privateKey != null && !privateIps.add(privateKey) || publicKey != null && !publicIps.add(publicKey);
             Asset byName = assets.findByNameIgnoreCaseAndProjectId(candidate.getName(), candidate.getProject().getId()).orElse(null);
             Asset byPrivateIp = candidate.getPrivateIp() == null ? null : assets.findByPrivateIpIgnoreCase(candidate.getPrivateIp()).orElse(null);
             Asset byPublicIp = candidate.getPublicIp() == null ? null : assets.findByPublicIpIgnoreCase(candidate.getPublicIp()).orElse(null);
-            if (strategy == DuplicateStrategy.SKIP && (repeated || byName != null || byPrivateIp != null || byPublicIp != null)) return "检测到重复资产；当前策略为跳过";
-            if (strategy == DuplicateStrategy.MERGE) {
-                Set<Long> ids = new HashSet<>(); if (byName != null) ids.add(byName.getId()); if (byPrivateIp != null) ids.add(byPrivateIp.getId()); if (byPublicIp != null) ids.add(byPublicIp.getId());
-                if (ids.size() > 1) return "名称和 IP 分别匹配到不同资产，无法安全合并";
+
+            if (strategy == DuplicateStrategy.SKIP) {
+                boolean repeated = context.names.containsKey(nameKey)
+                        || privateKey != null && context.privateIps.containsKey(privateKey)
+                        || publicKey != null && context.publicIps.containsKey(publicKey);
+                if (repeated || byName != null || byPrivateIp != null || byPublicIp != null) {
+                    return "检测到重复资产；当前策略为跳过";
+                }
+                String group = context.nextGroup();
+                registerValidationKeys(context, nameKey, privateKey, publicKey, group);
+                return null;
             }
+
+            Set<String> groups = new LinkedHashSet<>();
+            addValidationGroup(groups, byName, context.names.get(nameKey));
+            addValidationGroup(groups, byPrivateIp, privateKey == null ? null : context.privateIps.get(privateKey));
+            addValidationGroup(groups, byPublicIp, publicKey == null ? null : context.publicIps.get(publicKey));
+            if (groups.size() > 1) return "名称和 IP 分别匹配到不同资产，无法安全合并";
+            String group = groups.isEmpty() ? context.nextGroup() : groups.iterator().next();
+            registerValidationKeys(context, nameKey, privateKey, publicKey, group);
             return null;
-        } catch (RuntimeException ex) { return ex.getMessage() == null ? "字段校验失败" : ex.getMessage(); }
+        } catch (BadRequestException exception) {
+            return exception.getMessage() == null ? "字段校验失败" : exception.getMessage();
+        }
+    }
+
+    private void addValidationGroup(Set<String> groups, Asset databaseMatch, String fileMatch) {
+        if (databaseMatch != null) groups.add("DB:" + databaseMatch.getId());
+        if (fileMatch != null) groups.add(fileMatch);
+    }
+
+    private void registerValidationKeys(ImportValidationContext context, String nameKey,
+                                        String privateKey, String publicKey, String group) {
+        context.names.putIfAbsent(nameKey, group);
+        if (privateKey != null) context.privateIps.putIfAbsent(privateKey, group);
+        if (publicKey != null) context.publicIps.putIfAbsent(publicKey, group);
     }
 
     private Map<String, Object> csvBody(CSVRecord record) {
@@ -427,7 +471,7 @@ public class AssetController {
                     Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps, strategy);
                     auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
-                } catch (RuntimeException ex) {
+                } catch (BadRequestException ex) {
                     skipped++;
                     addImportFailure(audit, (int) line, ex.getMessage(), recordData(record), errors);
                 }
@@ -601,10 +645,10 @@ public class AssetController {
     private String ipValue(Map<String, Object> body, String key) {
         String value = text(body, key);
         if (value == null) return null;
-        if (value.length() > 45 || !value.matches("^[0-9A-Fa-f:.]+$") || !value.contains("." ) && !value.contains(":")) {
+        if (!IpAddressValidator.isValid(value)) {
             throw new BadRequestException(key + " 不是有效的 IP 地址");
         }
-        return value;
+        return IpAddressValidator.canonicalize(value);
     }
 
     private String limitText(String value, int max, String label) {
@@ -645,7 +689,7 @@ public class AssetController {
                     Asset asset = saveImportedAsset(request, body, seenNames, seenPrivateIps, seenPublicIps, strategy);
                     auditService.assetChange(asset.getId(), asset.getName(), "IMPORT", null, null, snapshot(asset), auditService.operator(request));
                     imported++;
-                } catch (RuntimeException ex) {
+                } catch (BadRequestException ex) {
                     skipped++;
                     addImportFailure(audit, i + 1, ex.getMessage(), rowData(row, formatter), errors);
                 }
@@ -686,6 +730,7 @@ public class AssetController {
             if (matches.size() > 1) throw new BadRequestException("名称、内网 IP 和外网 IP 分别匹配到不同资产，无法安全合并");
             Asset existing = existingByName != null ? existingByName : existingByPrivateIp != null ? existingByPrivateIp : existingByPublicIp;
             mergeNonEmpty(asset, existing, body);
+            ensureAssetUnique(existing);
             return assets.save(existing);
         }
         if (existingByName != null) {
@@ -722,6 +767,34 @@ public class AssetController {
     private String normalizeKey(String value) {
         if (value == null || value.trim().isEmpty()) return null;
         return value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private void ensureAssetUnique(Asset asset) {
+        Long currentId = asset.getId();
+        Asset sameName = assets.findByNameIgnoreCaseAndProjectId(asset.getName(), asset.getProject().getId()).orElse(null);
+        if (sameName != null && !Objects.equals(sameName.getId(), currentId)) {
+            throw new BadRequestException("同一项目下已存在资产名称：" + asset.getName());
+        }
+        if (asset.getPrivateIp() != null) {
+            Asset samePrivateIp = assets.findByPrivateIpIgnoreCase(asset.getPrivateIp()).orElse(null);
+            if (samePrivateIp != null && !Objects.equals(samePrivateIp.getId(), currentId)) {
+                throw new BadRequestException("内网 IP 已被其他资产使用：" + asset.getPrivateIp());
+            }
+        }
+        if (asset.getPublicIp() != null) {
+            Asset samePublicIp = assets.findByPublicIpIgnoreCase(asset.getPublicIp()).orElse(null);
+            if (samePublicIp != null && !Objects.equals(samePublicIp.getId(), currentId)) {
+                throw new BadRequestException("外网 IP 已被其他资产使用：" + asset.getPublicIp());
+            }
+        }
+    }
+
+    private Asset saveAsset(Asset asset) {
+        try {
+            return assets.saveAndFlush(asset);
+        } catch (DataIntegrityViolationException exception) {
+            throw new BadRequestException("资产名称或 IP 已存在，请检查后重试");
+        }
     }
 
     private Map<String, Object> importResult(Long importId, int imported, int skipped, List<String> errors) {

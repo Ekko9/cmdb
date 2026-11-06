@@ -7,7 +7,11 @@ import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "cmdb_asset")
+@Table(name = "cmdb_asset", uniqueConstraints = {
+        @UniqueConstraint(name = "uk_cmdb_asset_project_name", columnNames = {"project_id", "name"}),
+        @UniqueConstraint(name = "uk_cmdb_asset_private_ip", columnNames = "private_ip"),
+        @UniqueConstraint(name = "uk_cmdb_asset_public_ip", columnNames = "public_ip")
+})
 @Getter @Setter @NoArgsConstructor
 public class Asset {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY) private Long id;

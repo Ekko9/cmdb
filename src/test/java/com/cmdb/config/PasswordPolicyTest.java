@@ -24,4 +24,12 @@ class PasswordPolicyTest {
         assertTrue(PasswordPolicy.isExpired(null, LocalDateTime.now()));
         assertEquals(0, PasswordPolicy.daysRemaining(null, LocalDateTime.now()));
     }
+
+    @Test
+    void validatesComplexityAndBcryptLengthLimit() {
+        assertTrue(PasswordPolicy.isValid("StrongPass1!"));
+        assertFalse(PasswordPolicy.isValid("weak"));
+        assertFalse(PasswordPolicy.isValid("Strong Pass1!"));
+        assertFalse(PasswordPolicy.isValid("Aa1!" + "x".repeat(69)));
+    }
 }

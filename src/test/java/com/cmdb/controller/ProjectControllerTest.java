@@ -28,4 +28,14 @@ class ProjectControllerTest {
 
         assertThrows(BadRequestException.class, () -> controller.create(mock(HttpServletRequest.class), project));
     }
+
+    @Test
+    void rejectsFieldsLongerThanDatabaseColumns() {
+        ProjectController controller = new ProjectController(mock(ProjectRepository.class),
+                mock(AssetRepository.class), mock(AuditService.class));
+        Project project = new Project();
+        project.setName("x".repeat(101));
+
+        assertThrows(BadRequestException.class, () -> controller.create(mock(HttpServletRequest.class), project));
+    }
 }
